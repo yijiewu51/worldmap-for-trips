@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>我们的旅行地图</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- 登录/访问控制界面 -->
+    <div id="loginModal" class="modal" style="display: none !important;">
+        <div class="modal-content login-content">
+            <h2>🔒 访问我们的旅行地图</h2>
+            <p class="login-hint">默认密码：20251213</p>
+            <form id="loginForm">
+                <div class="form-group">
+                    <input type="password" id="accessPassword" placeholder="请输入密码（默认：20251213）" required autofocus>
+                </div>
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">进入</button>
+                    <button type="button" id="resetPasswordBtn" class="btn btn-secondary" style="margin-top: 10px;">重置密码</button>
+                </div>
+            </form>
+            <p class="login-note">首次使用：将自动使用默认密码 20251213</p>
+        </div>
+    </div>
+
+    <!-- 用户设置模态框 -->
+    <div id="userSettingsModal" class="modal" style="display: none !important;">
+        <div class="modal-content">
+            <span class="close-settings">&times;</span>
+            <h2>👥 用户设置</h2>
+            <div id="userSettings">
+                <div class="user-setting-item">
+                    <h3>用户1</h3>
+                    <div class="avatar-upload">
+                        <img id="user1AvatarPreview" src="" alt="用户1头像" class="avatar-preview">
+                        <input type="file" id="user1AvatarInput" accept="image/*" style="display: none;">
+                        <button type="button" class="btn btn-secondary" onclick="document.getElementById('user1AvatarInput').click()">选择头像</button>
+                    </div>
+                    <input type="text" id="user1Name" placeholder="用户1名称" class="user-name-input">
+                </div>
+                <div class="user-setting-item">
+                    <h3>用户2</h3>
+                    <div class="avatar-upload">
+                        <img id="user2AvatarPreview" src="" alt="用户2头像" class="avatar-preview">
+                        <input type="file" id="user2AvatarInput" accept="image/*" style="display: none;">
+                        <button type="button" class="btn btn-secondary" onclick="document.getElementById('user2AvatarInput').click()">选择头像</button>
+                    </div>
+                    <input type="text" id="user2Name" placeholder="用户2名称" class="user-name-input">
+                </div>
+            </div>
+            <div class="form-actions">
+                <button type="button" id="saveUserSettings" class="btn btn-primary">保存设置</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="container" id="mainContainer" style="display: none;">
+        <header>
+            <h1>🌍 我们的旅行地图</h1>
+            <div class="header-controls">
+                <div class="user-info">
+                    <div class="current-user">
+                        <img id="currentUserAvatar" src="" alt="当前用户" class="user-avatar-small">
+                        <span id="currentUserName">用户</span>
+                        <button id="switchUserBtn" class="btn btn-secondary btn-small">切换</button>
+                    </div>
+                    <button id="userSettingsBtn" class="btn btn-secondary btn-small">⚙️ 设置</button>
+                    <button id="exportDataBtn" class="btn btn-secondary btn-small" title="导出数据">📤 导出</button>
+                    <button id="importDataBtn" class="btn btn-secondary btn-small" title="导入数据">📥 导入</button>
+                    <button id="syncStatusBtn" class="btn btn-secondary btn-small" title="点击手动同步">🔄 <span id="syncStatus">同步</span></button>
+                </div>
+                <button id="addPlaceBtn" class="btn btn-primary">➕ 添加地点</button>
+                <div class="filter-buttons">
+                    <button class="filter-btn active" data-filter="all">全部</button>
+                    <button class="filter-btn" data-filter="visited">已去过</button>
+                    <button class="filter-btn" data-filter="wishlist">想去</button>
+                    <button class="filter-btn" data-filter="user">按用户</button>
+                </div>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <div id="map" class="map-container"></div>
+            
+            <aside class="sidebar">
+                <h2>地点列表</h2>
+                <div id="placesList" class="places-list">
+                    <p class="empty-message">点击"添加地点"开始记录你们的旅行足迹吧！</p>
+                </div>
+            </aside>
+        </div>
+    </div>
+
+    <!-- 添加/编辑地点模态框 -->
+    <div id="placeModal" class="modal">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <h2 id="modalTitle">添加新地点</h2>
+            <form id="placeForm">
+                <div class="form-group">
+                    <label for="placeName">地点名称 *</label>
+                    <div class="name-input-group">
+                        <input type="text" id="placeName" required placeholder="例如：巴黎、北京、Tokyo">
+                        <button type="button" id="searchLocationBtn" class="btn btn-secondary">🔍 搜索坐标</button>
+                    </div>
+                    <small class="hint-text">输入城市或地点名称后点击"搜索坐标"自动获取位置</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="placeType">类型 *</label>
+                    <select id="placeType" required>
+                        <option value="visited">已去过</option>
+                        <option value="wishlist">想去</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label>添加者</label>
+                    <div class="user-selector">
+                        <label class="user-option">
+                            <input type="radio" name="placeUser" value="user1" checked>
+                            <img id="formUser1Avatar" src="" alt="用户1" class="user-avatar-selector">
+                            <span id="formUser1Name">用户1</span>
+                        </label>
+                        <label class="user-option">
+                            <input type="radio" name="placeUser" value="user2">
+                            <img id="formUser2Avatar" src="" alt="用户2" class="user-avatar-selector">
+                            <span id="formUser2Name">用户2</span>
+                        </label>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label for="placeNotes">备注</label>
+                    <textarea id="placeNotes" rows="4" placeholder="记录下你们的回忆或计划..."></textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label for="placeDate">日期</label>
+                    <div class="date-input-group">
+                        <select id="placeDateYear" style="flex: 1; padding: 10px; border: 2px solid #e0e0e0; border-radius: 6px; font-size: 14px;">
+                            <option value="">选择年份（可选）</option>
+                        </select>
+                        <select id="placeDateMonth" style="flex: 1; padding: 10px; border: 2px solid #e0e0e0; border-radius: 6px; font-size: 14px; margin-left: 10px;">
+                            <option value="">选择月份（可选）</option>
+                        </select>
+                        <input type="date" id="placeDate" style="flex: 1; margin-left: 10px;">
+                    </div>
+                    <small class="hint-text">可以只选择年份，或选择完整日期</small>
+                </div>
+                
+                <div class="form-group">
+                    <label>坐标（自动填充或手动输入）</label>
+                    <div class="coords-input">
+                        <input type="number" id="placeLat" step="any" placeholder="纬度" required>
+                        <input type="number" id="placeLng" step="any" placeholder="经度" required>
+                        <button type="button" id="getCurrentLocation" class="btn btn-secondary">📍 当前位置</button>
+                    </div>
+                    <small class="hint-text">也可以在地图上点击选择位置</small>
+                </div>
+                
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">保存</button>
+                    <button type="button" id="cancelBtn" class="btn btn-secondary">取消</button>
+                    <button type="button" id="deleteBtn" class="btn btn-danger" style="display: none;">删除</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 地点详情模态框 -->
+    <div id="detailModal" class="modal">
+        <div class="modal-content">
+            <span class="close-detail">&times;</span>
+            <div id="placeDetails"></div>
+        </div>
+    </div>
+
+    <!-- 隐藏的文件输入用于导入数据 -->
+    <input type="file" id="importFileInput" accept=".json" style="display: none;">
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
+
