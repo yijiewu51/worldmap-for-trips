@@ -575,20 +575,6 @@
       "updatedAt": 1767045871841
     },
     {
-      "id": "1767045978708",
-      "name": "布宜诺斯艾利斯",
-      "type": "wishlist",
-      "notes": "",
-      "date": "",
-      "lat": -34.609558,
-      "lng": -58.38879,
-      "userIds": [
-        "user1"
-      ],
-      "country": "Argentina",
-      "updatedAt": 1767045978708
-    },
-    {
       "id": "1767046030020",
       "name": "冈仁波齐",
       "type": "wishlist",
@@ -629,20 +615,6 @@
       ],
       "country": "Iceland",
       "updatedAt": 1767046216010
-    },
-    {
-      "id": "1767046468761",
-      "name": "巴塔哥尼亚",
-      "type": "wishlist",
-      "notes": "",
-      "date": "",
-      "lat": -44.99007,
-      "lng": -70.673431,
-      "userIds": [
-        "user1"
-      ],
-      "country": "Argentina",
-      "updatedAt": 1767046468761
     },
     {
       "id": "1767046524819",

@@ -1,1958 +1,1172 @@
-// 应用状态
-let map;
-let places = [];
-let currentFilter = 'all';
-let editingPlaceId = null;
-let markers = {};
-let searchMarker = null; // 用于显示搜索结果的位置标记
-let searchTimeout = null; // 防抖定时器
-let currentUser = 'user1'; // 当前用户
-let users = {
-    user1: { name: '用户1', avatar: '' },
-    user2: { name: '用户2', avatar: '' }
-};
-let accessPassword = ''; // 访问密码
-let syncEnabled = true; // 自动同步是否启用
-let syncInterval = null; // 同步定时器
-let lastSyncTime = null; // 最后同步时间
-let syncStorageKey = 'travelMapSharedData'; // 共享存储键名（本地备用）
-let roomId = null; // 房间ID（用于共享数据）
-let syncApiUrl = null; // 同步API URL（简单存储服务）
+// ============================================================
+//  STATE
+// ============================================================
+const STORAGE_KEY      = 'worldmap_v2';
+const STORAGE_KEY_OLD  = 'travelMapSharedData';
+const SYNC_CONFIG_KEY  = 'worldmap_sync_config';
 
-// 初始化应用
-document.addEventListener('DOMContentLoaded', function() {
-    // 首先确保所有模态框和容器初始状态正确
-    const loginModal = document.getElementById('loginModal');
-    const userSettingsModal = document.getElementById('userSettingsModal');
-    const placeModal = document.getElementById('placeModal');
-    const detailModal = document.getElementById('detailModal');
-    const mainContainer = document.getElementById('mainContainer');
-    
-    // 强制隐藏所有模态框（使用内联样式确保优先级）
-    if (loginModal) {
-        loginModal.classList.remove('show');
-        loginModal.style.display = 'none';
-    }
-    if (userSettingsModal) {
-        userSettingsModal.classList.remove('show');
-        userSettingsModal.style.display = 'none';
-    }
-    if (placeModal) {
-        placeModal.classList.remove('show');
-        placeModal.style.display = 'none';
-    }
-    if (detailModal) {
-        detailModal.classList.remove('show');
-        detailModal.style.display = 'none';
-    }
-    
-    // 确保主容器初始是隐藏的
-    if (mainContainer) {
-        mainContainer.style.display = 'none';
-    }
-    
-    // 加载数据
-    loadUsers();
-    loadAccessPassword();
-    loadRoomId();
-    loadSyncApiUrl();
-    initDateSelectors(); // 初始化日期选择器
-    
-    // 根据登录状态显示正确的界面
-    checkAccess();
-    
-    // 设置事件监听器
-    setupEventListeners();
+let supabaseClient = null;
+let syncChannel    = null;
+let syncInterval   = null;
+
+let state = {
+  places: [],
+  users: { user1: { name: 'USER_1' }, user2: { name: 'USER_2' } },
+};
+
+let map;
+let markers         = {};
+let currentFilter   = 'all';
+let currentUser     = 'user1';
+let editingPlaceId  = null;
+let tripPlaceId     = null;
+let tripEditId      = null; // trip id being edited (null = new trip)
+let pickingCoords   = false;
+
+const ITEM_TYPES = {
+  attraction: { emoji: '📍', label: 'ATTRACTION', color: '#3fb950' },
+  food:       { emoji: '🍜', label: 'FOOD',       color: '#d29922' },
+  hotel:      { emoji: '🏨', label: 'HOTEL',      color: '#bc8cff' },
+  transport:  { emoji: '🚄', label: 'TRANSPORT',  color: '#58a6ff' },
+  other:      { emoji: '✨', label: 'OTHER',       color: '#7d8590' },
+};
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// ============================================================
+//  BOOT
+// ============================================================
+document.addEventListener('DOMContentLoaded', async () => {
+  await loadState();
+  initMap();
+  setupEventListeners();
+  renderAll();
+  initSync(); // try to connect if previously configured
+  setStatus('ready ♡');
 });
 
-// 初始化日期选择器（年份和月份）
-function initDateSelectors() {
-    // 初始化年份选择器（从2000年到2030年）
-    const yearSelect = document.getElementById('placeDateYear');
-    const monthSelect = document.getElementById('placeDateMonth');
-    
-    if (yearSelect) {
-        const currentYear = new Date().getFullYear();
-        for (let year = 2000; year <= 2030; year++) {
-            const option = document.createElement('option');
-            option.value = year;
-            option.textContent = year + '年';
-            if (year === currentYear) {
-                option.selected = false; // 默认不选中，让用户选择
-            }
-            yearSelect.appendChild(option);
-        }
-    }
-    
-    if (monthSelect) {
-        const months = [
-            { value: '01', text: '1月' }, { value: '02', text: '2月' },
-            { value: '03', text: '3月' }, { value: '04', text: '4月' },
-            { value: '05', text: '5月' }, { value: '06', text: '6月' },
-            { value: '07', text: '7月' }, { value: '08', text: '8月' },
-            { value: '09', text: '9月' }, { value: '10', text: '10月' },
-            { value: '11', text: '11月' }, { value: '12', text: '12月' }
-        ];
-        months.forEach(month => {
-            const option = document.createElement('option');
-            option.value = month.value;
-            option.textContent = month.text;
-            monthSelect.appendChild(option);
-        });
-    }
-}
-
-// 加载房间ID
-function loadRoomId() {
-    roomId = localStorage.getItem('travelMapRoomId');
-    if (!roomId) {
-        // 如果没有房间ID，生成一个（你们需要共享这个ID）
-        roomId = 'travel-map-' + Math.random().toString(36).substring(2, 15);
-        localStorage.setItem('travelMapRoomId', roomId);
-    }
-}
-
-// 加载同步API URL（简单配置）
-function loadSyncApiUrl() {
-    // 方法1：使用 GitHub Gist（最简单，无需验证码，只需GitHub账号）
-    const gistUrl = localStorage.getItem('travelMapGistUrl');
-    if (gistUrl && gistUrl.includes('gist.githubusercontent.com')) {
-        syncApiUrl = gistUrl;
-        console.log('使用GitHub Gist同步');
-        return;
-    }
-    
-    // 方法2：使用 JSONBin.io（如果之前配置过）
-    const jsonBinId = localStorage.getItem('travelMapJsonBinId');
-    if (jsonBinId && jsonBinId !== 'YOUR_BIN_ID') {
-        syncApiUrl = `https://api.jsonbin.io/v3/b/${jsonBinId}`;
-        console.log('使用JSONBin.io同步');
-        return;
-    }
-    
-    // 未配置，使用本地存储模式
-    syncApiUrl = null;
-    console.log('未配置同步API，使用本地存储模式');
-}
-
-// Firebase代码已移除，使用简单的JSONBin.io方案
-
-// 检查访问权限
-function checkAccess() {
-    // 先确保所有界面都隐藏
-    const loginModal = document.getElementById('loginModal');
-    const mainContainer = document.getElementById('mainContainer');
-    const userSettingsModal = document.getElementById('userSettingsModal');
-    
-    if (loginModal) loginModal.classList.remove('show');
-    if (mainContainer) mainContainer.style.display = 'none';
-    if (userSettingsModal) userSettingsModal.classList.remove('show');
-    
-    const savedPassword = localStorage.getItem('travelMapPassword');
-    const isAuthenticated = sessionStorage.getItem('travelMapAuthenticated') === 'true';
-    
-    if (savedPassword && isAuthenticated) {
-        // 已认证，显示主界面
-        showMainInterface();
-    } else {
-        // 显示登录界面
-        showLoginInterface();
-    }
-}
-
-// 显示登录界面
-function showLoginInterface() {
-    const loginModal = document.getElementById('loginModal');
-    const mainContainer = document.getElementById('mainContainer');
-    const userSettingsModal = document.getElementById('userSettingsModal');
-    const placeModal = document.getElementById('placeModal');
-    const detailModal = document.getElementById('detailModal');
-    
-    // 隐藏所有其他界面
-    if (mainContainer) {
-        mainContainer.style.display = 'none';
-    }
-    if (userSettingsModal) {
-        userSettingsModal.classList.remove('show');
-        userSettingsModal.style.display = 'none';
-    }
-    if (placeModal) {
-        placeModal.classList.remove('show');
-        placeModal.style.display = 'none';
-    }
-    if (detailModal) {
-        detailModal.classList.remove('show');
-        detailModal.style.display = 'none';
-    }
-    
-    // 显示登录界面
-    if (loginModal) {
-        loginModal.style.display = 'flex';
-        loginModal.classList.add('show');
-    }
-}
-
-// 显示主界面
-function showMainInterface() {
+// ============================================================
+//  DATA
+// ============================================================
+async function loadState() {
+  let raw = localStorage.getItem(STORAGE_KEY);
+  if (!raw) {
+    raw = localStorage.getItem(STORAGE_KEY_OLD);
+    if (raw) setStatus('migrated data from previous version');
+  }
+  // Auto-load bundled JSON on first visit
+  if (!raw) {
     try {
-        const loginModal = document.getElementById('loginModal');
-        const mainContainer = document.getElementById('mainContainer');
-        const userSettingsModal = document.getElementById('userSettingsModal');
-        const placeModal = document.getElementById('placeModal');
-        const detailModal = document.getElementById('detailModal');
-        
-        // 隐藏登录界面
-        if (loginModal) {
-            loginModal.classList.remove('show');
-            loginModal.style.display = 'none';
-        }
-        
-        // 隐藏所有模态框（除非用户主动打开）
-        if (userSettingsModal && !userSettingsModal.classList.contains('show')) {
-            userSettingsModal.style.display = 'none';
-        }
-        if (placeModal && !placeModal.classList.contains('show')) {
-            placeModal.style.display = 'none';
-        }
-        if (detailModal && !detailModal.classList.contains('show')) {
-            detailModal.style.display = 'none';
-        }
-        
-        // 显示主界面
-        if (mainContainer) {
-            mainContainer.style.display = 'block';
-        }
-        
-        if (!map) {
-            initMap();
-        }
-        loadPlaces();
-        updateUserDisplay();
-        updateUserAvatars();
-        // 启动自动同步
-        if (syncEnabled) {
-            startAutoSync();
-        }
-    } catch (error) {
-        console.error('显示主界面时出错:', error);
-        alert('页面加载出错，请刷新页面重试。错误：' + error.message);
+      const res = await fetch('travel-map-data-2025-12-29.json');
+      if (res.ok) {
+        raw = await res.text();
+        setStatus('loaded travel data ♡');
+      }
+    } catch (_) { /* no bundled data */ }
+  }
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed.places) {
+      state.places = parsed.places.map(p => ({
+        ...p,
+        trips:   p.trips   || [],
+        country: p.country || '',
+        addedBy: p.addedBy || p.user || 'user1',
+      }));
     }
+    if (parsed.users) {
+      state.users = {
+        user1: { name: 'USER_1', ...parsed.users.user1 },
+        user2: { name: 'USER_2', ...parsed.users.user2 },
+      };
+    }
+  } catch (e) {
+    setStatus('error: failed to load saved data', true);
+  }
 }
 
-// 加载用户信息
-function loadUsers() {
-    const saved = localStorage.getItem('travelMapUsers');
-    if (saved) {
-        try {
-            users = JSON.parse(saved);
-        } catch (e) {
-            console.error('加载用户信息失败:', e);
-        }
-    }
-    updateUserAvatars();
+function saveState() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if (supabaseClient) pushToSupabase();
 }
 
-// 保存用户信息
-function saveUsers() {
-    localStorage.setItem('travelMapUsers', JSON.stringify(users));
-    updateUserAvatars();
-    updateUserDisplay();
-    // 同步到云端
-    if (syncApiUrl) {
-        syncToCloud();
-    }
+function uuid() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
-// 加载访问密码
-function loadAccessPassword() {
-    const saved = localStorage.getItem('travelMapPassword');
-    if (saved) {
-        accessPassword = saved;
-    }
-}
-
-// 更新用户头像显示
-function updateUserAvatars() {
-    try {
-        // 更新表单中的用户头像
-        const user1Avatar = users.user1.avatar || 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPGNpcmNsZSBjeD0iMjAiIGN5PSIyMCIgcj0iMjAiIGZpbGw9IiM2NjdlZWEiLz4KPHN2ZyB4PSIxMCIgeT0iMTAiIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+CjxwYXRoIGQ9Ik0xMiAxMmMyLjIxIDAgNC0xLjc5IDQtNHMtMS43OS00LTQtNC00IDEuNzktNCA0IDEuNzkgNCA0IDR6bTAgMmMtMi42NyAwLTggMS4zNC04IDR2MmgxNnYtMmMwLTIuNjYtNS4zMy00LTgtNHoiLz4KPC9zdmc+Cjwvc3ZnPg==';
-        const user2Avatar = users.user2.avatar || 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPGNpcmNsZSBjeD0iMjAiIGN5PSIyMCIgcj0iMjAiIGZpbGw9IiM3NjRiYTIiLz4KPHN2ZyB4PSIxMCIgeT0iMTAiIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+CjxwYXRoIGQ9Ik0xMiAxMmMyLjIxIDAgNC0xLjc5IDQtNHMtMS43OS00LTQtNC00IDEuNzktNCA0IDEuNzkgNCA0IDR6bTAgMmMtMi42NyAwLTggMS4zNC04IDR2MmgxNnYtMmMwLTIuNjYtNS4zMy00LTgtNHoiLz4KPC9zdmc+Cjwvc3ZnPg==';
-        
-        const formUser1Avatar = document.getElementById('formUser1Avatar');
-        const formUser2Avatar = document.getElementById('formUser2Avatar');
-        const user1AvatarPreview = document.getElementById('user1AvatarPreview');
-        const user2AvatarPreview = document.getElementById('user2AvatarPreview');
-        const formUser1Name = document.getElementById('formUser1Name');
-        const formUser2Name = document.getElementById('formUser2Name');
-        const user1Name = document.getElementById('user1Name');
-        const user2Name = document.getElementById('user2Name');
-        
-        if (formUser1Avatar) formUser1Avatar.src = user1Avatar;
-        if (formUser2Avatar) formUser2Avatar.src = user2Avatar;
-        if (user1AvatarPreview) user1AvatarPreview.src = user1Avatar;
-        if (user2AvatarPreview) user2AvatarPreview.src = user2Avatar;
-        if (formUser1Name) formUser1Name.textContent = users.user1.name || '用户1';
-        if (formUser2Name) formUser2Name.textContent = users.user2.name || '用户2';
-        if (user1Name) user1Name.value = users.user1.name || '用户1';
-        if (user2Name) user2Name.value = users.user2.name || '用户2';
-    } catch (error) {
-        console.error('更新用户头像时出错:', error);
-    }
-}
-
-// 更新当前用户显示
-function updateUserDisplay() {
-    try {
-        const currentUserData = users[currentUser];
-        const currentUserAvatar = document.getElementById('currentUserAvatar');
-        const currentUserName = document.getElementById('currentUserName');
-        
-        if (currentUserAvatar) {
-            currentUserAvatar.src = currentUserData.avatar || getDefaultAvatar(currentUser);
-        }
-        if (currentUserName) {
-            currentUserName.textContent = currentUserData.name || (currentUser === 'user1' ? '用户1' : '用户2');
-        }
-    } catch (error) {
-        console.error('更新当前用户显示时出错:', error);
-    }
-}
-
-// 获取默认头像
-function getDefaultAvatar(userId) {
-    if (userId === 'user1') {
-        return 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjgiIGhlaWdodD0iMjgiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPGNpcmNsZSBjeD0iMjAiIGN5PSIyMCIgcj0iMjAiIGZpbGw9IiM2NjdlZWEiLz4KPHN2ZyB4PSIxMCIgeT0iMTAiIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+CjxwYXRoIGQ9Ik0xMiAxMmMyLjIxIDAgNC0xLjc5IDQtNHMtMS43OS00LTQtNC00IDEuNzktNCA0IDEuNzkgNCA0IDR6bTAgMmMtMi42NyAwLTggMS4zNC04IDR2MmgxNnYtMmMwLTIuNjYtNS4zMy00LTgtNHoiLz4KPC9zdmc+Cjwvc3ZnPg==';
-    } else {
-        return 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjgiIGhlaWdodD0iMjgiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPGNpcmNsZSBjeD0iMjAiIGN5PSIyMCIgcj0iMjAiIGZpbGw9IiM3NjRiYTIiLz4KPHN2ZyB4PSIxMCIgeT0iMTAiIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+CjxwYXRoIGQ9Ik0xMiAxMmMyLjIxIDAgNC0xLjc5IDQtNHMtMS43OS00LTQtNC00IDEuNzktNCA0IDEuNzkgNCA0IDR6bTAgMmMtMi42NyAwLTggMS4zNC04IDR2MmgxNnYtMmMwLTIuNjYtNS4zMy00LTgtNHoiLz4KPC9zdmc+Cjwvc3ZnPg==';
-    }
-}
-
-// 初始化地图
+// ============================================================
+//  MAP
+// ============================================================
 function initMap() {
-    // 默认中心点：中国
-    map = L.map('map').setView([35.8617, 104.1954], 3);
-    
-    // 使用OpenStreetMap瓦片（英文版）
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap contributors',
-        maxZoom: 19
-    }).addTo(map);
-    
-    // 添加英文地名标签层（可选，如果需要更明确的英文地名）
-    // 注意：OpenStreetMap默认瓦片已经是英文，这里主要是确保地理编码使用英文
-    
-    // 地图点击事件
-    map.on('click', function(e) {
-        if (document.getElementById('placeModal').classList.contains('show')) {
-            document.getElementById('placeLat').value = e.latlng.lat.toFixed(6);
-            document.getElementById('placeLng').value = e.latlng.lng.toFixed(6);
-        }
-    });
+  map = L.map('map', { center: [20, 0], zoom: 2, zoomControl: true });
+
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/NatGeo_World_Map/MapServer/tile/{z}/{y}/{x}', {
+    attribution: 'Tiles &copy; Esri &mdash; Nat. Geo., Esri, DeLorme, NAVTEQ, UNEP-WCMC, USGS, NASA, ESA',
+    maxZoom: 16,
+  }).addTo(map);
+
+  map.on('click', onMapClick);
+  map.on('mousemove', e => {
+    document.getElementById('coordDisplay').textContent =
+      `${e.latlng.lat.toFixed(3)}, ${e.latlng.lng.toFixed(3)}`;
+  });
 }
 
-// 设置事件监听器
-function setupEventListeners() {
-    // 登录表单
-    document.getElementById('loginForm').addEventListener('submit', function(e) {
-        e.preventDefault();
-        const password = document.getElementById('accessPassword').value.trim();
-        const savedPassword = localStorage.getItem('travelMapPassword');
-        const defaultPassword = '20251213'; // 默认密码
-        
-        // 如果输入的是默认密码，直接允许进入（无论之前设置的是什么密码）
-        if (password === defaultPassword) {
-            // 如果之前没有设置密码，保存默认密码
-            if (!savedPassword) {
-                localStorage.setItem('travelMapPassword', defaultPassword);
-            }
-            sessionStorage.setItem('travelMapAuthenticated', 'true');
-            console.log('密码验证成功，准备显示主界面');
-            showMainInterface();
-            return;
-        }
-        
-        if (!savedPassword) {
-            // 首次使用，使用输入的密码或默认密码
-            const finalPassword = password || defaultPassword;
-            localStorage.setItem('travelMapPassword', finalPassword);
-            accessPassword = finalPassword;
-            sessionStorage.setItem('travelMapAuthenticated', 'true');
-            showMainInterface();
-        } else if (password === savedPassword) {
-            // 密码正确
-            sessionStorage.setItem('travelMapAuthenticated', 'true');
-            showMainInterface();
-        } else {
-            alert('密码错误！\n\n提示：默认密码是 20251213\n\n如果忘记密码，可以点击"重置密码"按钮清除所有数据。');
-        }
-    });
-    
-    // 重置密码按钮
-    document.getElementById('resetPasswordBtn').addEventListener('click', function() {
-        if (confirm('确定要重置密码吗？这将清除所有数据（包括地点记录）！')) {
-            localStorage.removeItem('travelMapPassword');
-            localStorage.removeItem('travelPlaces');
-            localStorage.removeItem('travelMapUsers');
-            sessionStorage.removeItem('travelMapAuthenticated');
-            alert('密码已重置！请刷新页面，将使用默认密码 20251213');
-            location.reload();
-        }
-    });
-    
-    // 同步状态按钮（手动同步）
-    const syncStatusBtn = document.getElementById('syncStatusBtn');
-    if (syncStatusBtn) {
-        syncStatusBtn.addEventListener('click', function() {
-            if (syncApiUrl) {
-                // 云端同步：先上传，再下载
-                syncToCloud();
-                setTimeout(function() {
-                    loadFromCloud();
-                }, 500);
-            } else {
-                // 本地存储同步
-                syncToSharedStorage();
-                loadFromSharedStorage();
-            }
-            updateSyncStatus('同步中...');
-        });
-    }
-    
-    // 导出数据按钮（如果存在，保留作为备用）
-    const exportDataBtn = document.getElementById('exportDataBtn');
-    if (exportDataBtn) {
-        exportDataBtn.addEventListener('click', function() {
-            exportData();
-        });
-    }
-    
-    // 导入数据按钮（如果存在，保留作为备用）
-    const importDataBtn = document.getElementById('importDataBtn');
-    if (importDataBtn) {
-        importDataBtn.addEventListener('click', function() {
-            const importFileInput = document.getElementById('importFileInput');
-            if (importFileInput) {
-                importFileInput.click();
-            }
-        });
-    }
-    
-    // 文件选择后导入（如果存在）
-    const importFileInput = document.getElementById('importFileInput');
-    if (importFileInput) {
-        importFileInput.addEventListener('change', function(e) {
-            if (e.target.files.length > 0) {
-                importData(e.target.files[0]);
-            }
-        });
-    }
-    
-    // 如果首次使用，自动填充默认密码
-    window.addEventListener('load', function() {
-        const savedPassword = localStorage.getItem('travelMapPassword');
-        if (!savedPassword) {
-            document.getElementById('accessPassword').value = '20251213';
-        }
-    });
-    
-    // 用户设置按钮
-    document.getElementById('userSettingsBtn').addEventListener('click', function() {
-        // 确保显示当前保存的用户信息
-        document.getElementById('user1Name').value = users.user1.name || '用户1';
-        document.getElementById('user2Name').value = users.user2.name || '用户2';
-        const userSettingsModal = document.getElementById('userSettingsModal');
-        if (userSettingsModal) {
-            userSettingsModal.style.display = 'flex';
-            userSettingsModal.classList.add('show');
-        }
-    });
-    
-    // 关闭用户设置
-    document.querySelector('.close-settings').addEventListener('click', function() {
-        document.getElementById('userSettingsModal').classList.remove('show');
-    });
-    
-    // 保存用户设置
-    document.getElementById('saveUserSettings').addEventListener('click', function() {
-        const user1NameInput = document.getElementById('user1Name');
-        const user2NameInput = document.getElementById('user2Name');
-        
-        if (user1NameInput) {
-            users.user1.name = user1NameInput.value.trim() || '用户1';
-        }
-        if (user2NameInput) {
-            users.user2.name = user2NameInput.value.trim() || '用户2';
-        }
-        
-        saveUsers();
-        document.getElementById('userSettingsModal').classList.remove('show');
-        alert('用户设置已保存！');
-    });
-    
-    // 头像上传
-    document.getElementById('user1AvatarInput').addEventListener('change', function(e) {
-        handleAvatarUpload(e, 'user1');
-    });
-    
-    document.getElementById('user2AvatarInput').addEventListener('change', function(e) {
-        handleAvatarUpload(e, 'user2');
-    });
-    
-    // 切换用户按钮
-    document.getElementById('switchUserBtn').addEventListener('click', function() {
-        currentUser = currentUser === 'user1' ? 'user2' : 'user1';
-        updateUserDisplay();
-        // 自动选择当前用户
-        document.querySelector(`input[name="placeUser"][value="${currentUser}"]`).checked = true;
-    });
-    
-    // 添加地点按钮
-    document.getElementById('addPlaceBtn').addEventListener('click', function() {
-        editingPlaceId = null;
-        document.getElementById('modalTitle').textContent = '添加新地点';
-        document.getElementById('placeForm').reset();
-        document.getElementById('deleteBtn').style.display = 'none';
-        // 重置日期选择器
-        document.getElementById('placeDateYear').value = '';
-        document.getElementById('placeDateMonth').value = '';
-        document.getElementById('placeDate').value = '';
-        // 默认选择当前用户
-        document.querySelector(`input[name="placeUser"][value="${currentUser}"]`).checked = true;
-        const placeModal = document.getElementById('placeModal');
-        if (placeModal) {
-            placeModal.style.display = 'flex';
-            placeModal.style.position = 'fixed';
-            placeModal.style.top = '0';
-            placeModal.style.left = '0';
-            placeModal.style.width = '100%';
-            placeModal.style.height = '100%';
-            placeModal.style.zIndex = '10000';
-            placeModal.classList.add('show');
-        }
-    });
-    
-    // 关闭模态框
-    document.querySelector('.close').addEventListener('click', closeModal);
-    document.querySelector('.close-detail').addEventListener('click', closeDetailModal);
-    document.getElementById('cancelBtn').addEventListener('click', closeModal);
-    
-    // 点击模态框外部关闭
-    document.getElementById('placeModal').addEventListener('click', function(e) {
-        if (e.target === this) {
-            closeModal();
-        }
-    });
-    
-    document.getElementById('detailModal').addEventListener('click', function(e) {
-        if (e.target === this) {
-            closeDetailModal();
-        }
-    });
-    
-    document.getElementById('userSettingsModal').addEventListener('click', function(e) {
-        if (e.target === this) {
-            document.getElementById('userSettingsModal').classList.remove('show');
-        }
-    });
-    
-    // 表单提交
-    const placeForm = document.getElementById('placeForm');
-    if (placeForm) {
-        placeForm.addEventListener('submit', function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            console.log('表单提交事件触发');
-            savePlace().catch(error => {
-                console.error('保存地点失败:', error);
-                alert('保存失败：' + (error.message || '请重试'));
-            });
-            return false;
-        });
-    }
-    
-    // 删除按钮
-    document.getElementById('deleteBtn').addEventListener('click', function() {
-        if (editingPlaceId && confirm('确定要删除这个地点吗？')) {
-            deletePlace(editingPlaceId);
-            closeModal();
-        }
-    });
-    
-    // 搜索地点坐标
-    document.getElementById('searchLocationBtn').addEventListener('click', function() {
-        searchLocationByName();
-    });
-    
-    // 地点名称输入框回车键搜索
-    document.getElementById('placeName').addEventListener('keypress', function(e) {
-        if (e.key === 'Enter' && e.target.value.trim()) {
-            e.preventDefault();
-            searchLocationByName();
-        }
-    });
-    
-    // 获取当前位置
-    document.getElementById('getCurrentLocation').addEventListener('click', function() {
-        if (navigator.geolocation) {
-            navigator.geolocation.getCurrentPosition(function(position) {
-                document.getElementById('placeLat').value = position.coords.latitude.toFixed(6);
-                document.getElementById('placeLng').value = position.coords.longitude.toFixed(6);
-                // 清除搜索标记，显示当前位置
-                clearSearchMarker();
-                showLocationOnMap(position.coords.latitude, position.coords.longitude);
-            }, function() {
-                alert('无法获取当前位置，请手动输入坐标或在地图上点击选择位置。');
-            });
-        } else {
-            alert('您的浏览器不支持地理位置功能。');
-        }
-    });
-    
-    // 筛选按钮
-    document.querySelectorAll('.filter-btn').forEach(btn => {
-        btn.addEventListener('click', function() {
-            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-            this.classList.add('active');
-            currentFilter = this.dataset.filter;
-            renderPlacesList();
-            updateMapMarkers();
-        });
-    });
-    
-    // 坐标输入框改变时，如果坐标有效则在地图上显示预览（延迟绑定，因为元素可能在模态框中）
-    setTimeout(function() {
-        const placeLat = document.getElementById('placeLat');
-        const placeLng = document.getElementById('placeLng');
-        if (placeLat) placeLat.addEventListener('blur', updateMapPreview);
-        if (placeLng) placeLng.addEventListener('blur', updateMapPreview);
-    }, 100);
+function onMapClick(e) {
+  const { lat, lng } = e.latlng;
+  if (document.getElementById('placeModalOverlay').classList.contains('open')) {
+    document.getElementById('placeLat').value = lat.toFixed(5);
+    document.getElementById('placeLng').value = lng.toFixed(5);
+    setStatus(`coords picked: ${lat.toFixed(3)}, ${lng.toFixed(3)}`);
+  }
 }
 
-// 处理头像上传
-function handleAvatarUpload(event, userId) {
-    const file = event.target.files[0];
-    if (file && file.type.startsWith('image/')) {
-        const reader = new FileReader();
-        reader.onload = function(e) {
-            users[userId].avatar = e.target.result;
-            saveUsers();
-        };
-        reader.readAsDataURL(file);
-    } else {
-        alert('请选择图片文件！');
-    }
+function makeMarker(place) {
+  const icon = L.divIcon({
+    html: `<div class="map-marker ${place.type}" style="width:10px;height:10px"></div>`,
+    className: '',
+    iconSize: [10, 10],
+    iconAnchor: [5, 5],
+    popupAnchor: [0, -8],
+  });
+
+  const m = L.marker([place.lat, place.lng], { icon }).addTo(map);
+  m.bindPopup(`
+    <div class="popup-name">${escHtml(place.name)}</div>
+    <div class="popup-type ${place.type}">${place.type.toUpperCase()}</div>
+    ${place.date ? `<div class="popup-date">${place.date}</div>` : ''}
+  `);
+  m.on('click', () => openDetailModal(place.id));
+  return m;
 }
 
-// 更新地图预览（当坐标输入框有值时）
-function updateMapPreview() {
-    const lat = parseFloat(document.getElementById('placeLat').value);
-    const lng = parseFloat(document.getElementById('placeLng').value);
-    
-    if (!isNaN(lat) && !isNaN(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
-        showLocationOnMap(lat, lng);
-    }
+function refreshMarkers() {
+  Object.values(markers).forEach(m => m.remove());
+  markers = {};
+  getFilteredPlaces().forEach(p => { markers[p.id] = makeMarker(p); });
 }
 
-// 通过坐标获取国家信息（反向地理编码）
-async function getCountryFromCoordinates(lat, lng, retryCount = 0) {
-    try {
-        // 添加延迟以避免API限制
-        if (retryCount > 0) {
-            await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
-        }
-        
-        const response = await fetch(
-            `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=0&addressdetails=1&accept-language=en`,
-            {
-                headers: {
-                    'User-Agent': 'TravelMapApp/1.0'
-                }
-            }
-        );
-        
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        
-        const data = await response.json();
-        if (data && data.address) {
-            // 优先使用country，如果没有则使用country_code
-            const country = data.address.country || data.address.country_code;
-            if (country) {
-                return country;
-            }
-        }
-        
-        // 如果第一次失败，重试一次
-        if (retryCount < 1) {
-            return await getCountryFromCoordinates(lat, lng, retryCount + 1);
-        }
-        
-        return '未知';
-    } catch (error) {
-        console.error('获取国家信息失败:', error);
-        // 如果第一次失败，重试一次
-        if (retryCount < 1) {
-            return await getCountryFromCoordinates(lat, lng, retryCount + 1);
-        }
-        return '未知';
-    }
-}
+// ============================================================
+//  FILTER + RENDER
+// ============================================================
+function getFilteredPlaces(searchQuery) {
+  let list = currentFilter === 'all'
+    ? state.places
+    : state.places.filter(p => p.type === currentFilter);
 
-// 保存地点
-async function savePlace() {
-    try {
-        console.log('开始保存地点...');
-        const name = document.getElementById('placeName').value.trim();
-        const type = document.getElementById('placeType').value;
-        const notes = document.getElementById('placeNotes').value.trim();
-        
-        // 处理日期：支持只选年份、年月、或完整日期
-        let date = '';
-        const year = document.getElementById('placeDateYear').value;
-        const month = document.getElementById('placeDateMonth').value;
-        const fullDate = document.getElementById('placeDate').value;
-        
-        if (fullDate) {
-            // 如果选择了完整日期，使用完整日期
-            date = fullDate;
-        } else if (year && month) {
-            // 如果选择了年月，使用年月（日期设为1号）
-            date = `${year}-${month.padStart(2, '0')}-01`;
-        } else if (year) {
-            // 如果只选择了年份，使用年份（月份和日期设为1月1日）
-            date = `${year}-01-01`;
-        }
-        
-        const lat = parseFloat(document.getElementById('placeLat').value);
-        const lng = parseFloat(document.getElementById('placeLng').value);
-        const userRadio = document.querySelector('input[name="placeUser"]:checked');
-        
-        if (!name || isNaN(lat) || isNaN(lng)) {
-            alert('请填写完整信息！需要填写地点名称和坐标。');
-            return;
-        }
-        
-        if (!userRadio) {
-            alert('请选择添加者！');
-            return;
-        }
-        
-        const userId = userRadio.value;
-        
-        // 获取国家信息（如果是新地点或国家信息不存在）
-        let country = '未知';
-        console.log('获取国家信息...');
-        if (editingPlaceId) {
-            // 编辑现有地点，保留原有国家信息，如果没有则获取
-            const existingPlace = places.find(p => p.id === editingPlaceId);
-            if (existingPlace && existingPlace.country && existingPlace.country !== '未知') {
-                country = existingPlace.country;
-            } else {
-                country = await getCountryFromCoordinates(lat, lng);
-            }
-        } else {
-            // 新地点，获取国家信息
-            country = await getCountryFromCoordinates(lat, lng);
-        }
-        console.log('国家信息:', country);
-        
-        // 检查是否有重复地点（坐标相近或名称相同）
-        let existingPlace = null;
-        if (!editingPlaceId) {
-            // 只在新添加时检查重复，编辑时不检查
-            existingPlace = places.find(p => {
-                // 检查名称是否相同（忽略大小写和空格）
-                const nameMatch = p.name.toLowerCase().trim() === name.toLowerCase().trim();
-                
-                // 检查坐标是否相近（距离小于0.1度，约11公里）
-                const distance = Math.sqrt(
-                    Math.pow(p.lat - lat, 2) + Math.pow(p.lng - lng, 2)
-                );
-                const coordClose = distance < 0.1;
-                
-                // 如果名称相同，或者坐标非常接近（小于0.01度约1公里），都认为是重复
-                return nameMatch || coordClose;
-            });
-        }
-        
-        if (existingPlace && !editingPlaceId) {
-            // 发现重复地点，合并用户
-            if (!existingPlace.userIds) {
-                // 兼容旧数据：将单个userId转换为userIds数组
-                existingPlace.userIds = [existingPlace.userId || 'user1'];
-                delete existingPlace.userId;
-            }
-            
-            // 如果当前用户不在列表中，添加进去
-            if (!existingPlace.userIds.includes(userId)) {
-                existingPlace.userIds.push(userId);
-                // 合并备注（如果新备注不为空）
-                if (notes && notes.trim()) {
-                    if (existingPlace.notes && existingPlace.notes.trim()) {
-                        existingPlace.notes = existingPlace.notes + '\n\n' + notes;
-                    } else {
-                        existingPlace.notes = notes;
-                    }
-                }
-                // 更新时间为最新的
-                existingPlace.updatedAt = Date.now();
-                console.log('合并到现有地点:', existingPlace.name, '用户:', existingPlace.userIds);
-                // 保存并刷新，但不添加新地点
-                savePlaces();
-                renderPlacesList();
-                updateMapMarkers();
-                syncToSharedStorage();
-                closeModal();
-                alert(`已合并到现有地点"${existingPlace.name}"，现在显示我们都去过！`);
-                return; // 不继续添加新地点
-            } else {
-                console.log('用户已在该地点中');
-                alert(`您已经添加过地点"${existingPlace.name}"了！`);
-                closeModal();
-                return;
-            }
-        } else {
-            // 新地点或编辑现有地点
-            const place = {
-                id: editingPlaceId || Date.now().toString(),
-                name: name,
-                type: type,
-                notes: notes,
-                date: date,
-                lat: lat,
-                lng: lng,
-                userIds: [userId], // 使用数组支持多个用户
-                country: country, // 添加国家信息
-                updatedAt: Date.now() // 添加更新时间戳
-            };
-            
-            if (editingPlaceId) {
-                // 更新现有地点
-                const index = places.findIndex(p => p.id === editingPlaceId);
-                if (index !== -1) {
-                    // 保留原有的userIds
-                    const oldPlace = places[index];
-                    if (oldPlace.userIds && Array.isArray(oldPlace.userIds)) {
-                        place.userIds = oldPlace.userIds;
-                        // 如果当前用户不在列表中，添加进去
-                        if (!place.userIds.includes(userId)) {
-                            place.userIds.push(userId);
-                        }
-                    }
-                    places[index] = place;
-                    console.log('更新地点:', place.name);
-                }
-            } else {
-                // 添加新地点
-                places.push(place);
-                console.log('添加新地点:', place.name);
-            }
-        }
-        
-        savePlaces();
-        renderPlacesList();
-        updateMapMarkers();
-        syncToSharedStorage(); // 同步到共享存储
-        console.log('地点保存成功');
-        closeModal();
-    } catch (error) {
-        console.error('保存地点时出错:', error);
-        alert('保存失败：' + (error.message || '未知错误，请查看控制台'));
-        throw error;
-    }
-}
-
-// 获取地点的用户列表（兼容旧数据）
-function getPlaceUsers(place) {
-    if (place.userIds && Array.isArray(place.userIds)) {
-        return place.userIds;
-    }
-    // 兼容旧数据
-    if (place.userId) {
-        return [place.userId];
-    }
-    return ['user1'];
-}
-
-// 删除地点
-function deletePlace(id) {
-    places = places.filter(p => p.id !== id);
-    savePlaces();
-    renderPlacesList();
-    updateMapMarkers();
-}
-
-// 编辑地点
-function editPlace(id) {
-    const place = places.find(p => p.id === id);
-    if (!place) return;
-    
-    editingPlaceId = id;
-    document.getElementById('modalTitle').textContent = '编辑地点';
-    document.getElementById('placeName').value = place.name;
-    document.getElementById('placeType').value = place.type;
-    document.getElementById('placeNotes').value = place.notes || '';
-    
-    // 处理日期显示：如果只有年份，显示在年份选择器中
-    if (place.date) {
-        const dateObj = new Date(place.date);
-        const year = dateObj.getFullYear();
-        const month = dateObj.getMonth() + 1;
-        const day = dateObj.getDate();
-        
-        // 检查是否是1月1日（可能只是年份）
-        if (day === 1 && month === 1) {
-            document.getElementById('placeDateYear').value = year;
-            document.getElementById('placeDateMonth').value = '';
-            document.getElementById('placeDate').value = '';
-        } else if (day === 1) {
-            // 只有年月（1号）
-            document.getElementById('placeDateYear').value = year;
-            document.getElementById('placeDateMonth').value = month.toString().padStart(2, '0');
-            document.getElementById('placeDate').value = '';
-        } else {
-            // 完整日期
-            document.getElementById('placeDateYear').value = '';
-            document.getElementById('placeDateMonth').value = '';
-            document.getElementById('placeDate').value = place.date;
-        }
-    } else {
-        document.getElementById('placeDateYear').value = '';
-        document.getElementById('placeDateMonth').value = '';
-        document.getElementById('placeDate').value = '';
-    }
-    
-    document.getElementById('placeLat').value = place.lat;
-    document.getElementById('placeLng').value = place.lng;
-    // 设置用户选择（如果有多个用户，选择第一个）
-    const placeUsers = getPlaceUsers(place);
-    const firstUserId = placeUsers[0] || 'user1';
-    document.querySelector(`input[name="placeUser"][value="${firstUserId}"]`).checked = true;
-    document.getElementById('deleteBtn').style.display = 'block';
-    const placeModal = document.getElementById('placeModal');
-    if (placeModal) {
-        placeModal.style.display = 'flex';
-        placeModal.style.position = 'fixed';
-        placeModal.style.top = '0';
-        placeModal.style.left = '0';
-        placeModal.style.width = '100%';
-        placeModal.style.height = '100%';
-        placeModal.style.zIndex = '10000';
-        placeModal.classList.add('show');
-    }
-}
-
-// 显示地点详情
-function showPlaceDetails(id) {
-    const place = places.find(p => p.id === id);
-    if (!place) return;
-    
-    const details = document.getElementById('placeDetails');
-    const typeText = place.type === 'visited' ? '已去过' : '想去';
-    const typeClass = place.type === 'visited' ? 'visited' : 'wishlist';
-    const placeUsers = getPlaceUsers(place);
-    
-    // 生成用户显示HTML
-    let usersHtml = '';
-    if (placeUsers.length > 1) {
-        usersHtml = '<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;"><span class="detail-label">我们都去过：</span>';
-        placeUsers.forEach(userId => {
-            const userData = users[userId] || users.user1;
-            const userAvatar = userData.avatar || getDefaultAvatar(userId);
-            const userName = userData.name || (userId === 'user1' ? '用户1' : '用户2');
-            usersHtml += `<div style="display: flex; align-items: center; gap: 4px;"><img src="${userAvatar}" alt="${userName}" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover; border: 2px solid ${userId === 'user1' ? '#667eea' : '#764ba2'};"><span>${userName}</span></div>`;
-        });
-        usersHtml += '</div>';
-    } else {
-        const userId = placeUsers[0] || 'user1';
-        const userData = users[userId] || users.user1;
-        const userAvatar = userData.avatar || getDefaultAvatar(userId);
-        const userName = userData.name || (userId === 'user1' ? '用户1' : '用户2');
-        usersHtml = `<p style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;"><span class="detail-label">添加者：</span><img src="${userAvatar}" alt="${userName}" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover;"><span>${userName}</span></p>`;
-    }
-    
-    details.innerHTML = `
-        <div class="detail-section">
-            <h3>${place.name}</h3>
-            ${usersHtml}
-            <p><span class="detail-label">类型：</span><span class="place-item-type ${typeClass}">${typeText}</span></p>
-            ${place.date ? `<p><span class="detail-label">日期：</span>${formatDate(place.date)}</p>` : ''}
-            <p><span class="detail-label">坐标：</span>${place.lat.toFixed(4)}, ${place.lng.toFixed(4)}</p>
-            ${place.notes ? `<p><span class="detail-label">备注：</span></p><p>${place.notes}</p>` : '<p style="color: #999; font-style: italic;">暂无备注</p>'}
-        </div>
-        <div class="form-actions">
-            <button onclick="editPlace('${place.id}'); closeDetailModal();" class="btn btn-primary">编辑</button>
-            <button onclick="map.setView([${place.lat}, ${place.lng}], 10); closeDetailModal();" class="btn btn-secondary">定位</button>
-            <button onclick="if(confirm('确定要删除这个地点吗？')) { deletePlace('${place.id}'); closeDetailModal(); }" class="btn btn-danger">删除</button>
-        </div>
-    `;
-    
-    const detailModal = document.getElementById('detailModal');
-    if (detailModal) {
-        detailModal.style.display = 'flex';
-        detailModal.classList.add('show');
-    }
-}
-
-// 关闭模态框
-function closeModal() {
-    console.log('关闭模态框...');
-    const placeModal = document.getElementById('placeModal');
-    if (placeModal) {
-        placeModal.classList.remove('show');
-        placeModal.style.display = 'none';
-        placeModal.style.zIndex = '';
-        console.log('模态框已关闭');
-    }
-    editingPlaceId = null;
-    clearSearchMarker();
-}
-
-function closeDetailModal() {
-    document.getElementById('detailModal').classList.remove('show');
-}
-
-// 渲染地点列表
-function renderPlacesList() {
-    const list = document.getElementById('placesList');
-    let filteredPlaces = places.filter(place => {
-        if (currentFilter === 'all') return true;
-        if (currentFilter === 'user') {
-            const placeUsers = getPlaceUsers(place);
-            return placeUsers.includes(currentUser);
-        }
-        return place.type === currentFilter;
-    });
-    
-    if (filteredPlaces.length === 0) {
-        list.innerHTML = '<p class="empty-message">暂无地点记录</p>';
-        return;
-    }
-    
-    // 按日期排序（已去过的优先，然后按日期）
-    filteredPlaces.sort((a, b) => {
-        if (a.type !== b.type) {
-            return a.type === 'visited' ? -1 : 1;
-        }
-        if (a.date && b.date) {
-            return new Date(b.date) - new Date(a.date);
-        }
-        return 0;
-    });
-    
-    // 按照国家分组
-    const placesByCountry = {};
-    filteredPlaces.forEach(place => {
-        const country = place.country || '未知';
-        if (!placesByCountry[country]) {
-            placesByCountry[country] = [];
-        }
-        placesByCountry[country].push(place);
-    });
-    
-    // 按国家名称排序
-    const sortedCountries = Object.keys(placesByCountry).sort();
-    
-    // 生成HTML
-    let html = '';
-    sortedCountries.forEach(country => {
-        const countryPlaces = placesByCountry[country];
-        const countryId = 'country-' + country.replace(/\s+/g, '-');
-        
-        html += `
-            <div class="country-group">
-                <div class="country-header" onclick="toggleCountryGroup('${countryId}')">
-                    <span class="country-name">${country}</span>
-                    <span class="country-count">${countryPlaces.length} 个地点</span>
-                    <span class="country-toggle" id="toggle-${countryId}">▼</span>
-                </div>
-                <div class="country-places" id="${countryId}">
-                    ${countryPlaces.map(place => {
-                        const typeText = place.type === 'visited' ? '已去过' : '想去';
-                        const dateText = place.date ? formatDate(place.date) : '';
-                        const placeUsers = getPlaceUsers(place);
-                        
-                        // 生成用户头像HTML
-                        let avatarsHtml = '';
-                        if (placeUsers.length > 1) {
-                            // 多个用户，显示所有头像
-                            avatarsHtml = placeUsers.map(userId => {
-                                const userData = users[userId] || users.user1;
-                                const userAvatar = userData.avatar || getDefaultAvatar(userId);
-                                return `<img src="${userAvatar}" alt="" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover; border: 2px solid ${userId === 'user1' ? '#667eea' : '#764ba2'}; flex-shrink: 0;">`;
-                            }).join('');
-                        } else {
-                            // 单个用户
-                            const userId = placeUsers[0] || 'user1';
-                            const userData = users[userId] || users.user1;
-                            const userAvatar = userData.avatar || getDefaultAvatar(userId);
-                            avatarsHtml = `<img src="${userAvatar}" alt="" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover; border: 2px solid ${userId === 'user1' ? '#667eea' : '#764ba2'}; flex-shrink: 0;">`;
-                        }
-                        
-                        return `
-                            <div class="place-item ${place.type}" onclick="showPlaceDetails('${place.id}')">
-                                <div class="place-item-header">
-                                    <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
-                                        <div style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
-                                            ${avatarsHtml}
-                                            ${placeUsers.length > 1 ? '<span style="font-size: 12px; color: #667eea; font-weight: 600;">我们都去过</span>' : ''}
-                                        </div>
-                                        <div class="place-item-name" style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${place.name}</div>
-                                    </div>
-                                    <span class="place-item-type ${place.type}" style="flex-shrink: 0; margin-left: 8px;">${typeText}</span>
-                                </div>
-                                ${dateText ? `<div class="place-item-date">${dateText}</div>` : ''}
-                                ${place.notes ? `<div class="place-item-notes">${place.notes}</div>` : ''}
-                            </div>
-                        `;
-                    }).join('')}
-                </div>
-            </div>
-        `;
-    });
-    
-    list.innerHTML = html;
-}
-
-// 切换国家分组展开/折叠
-function toggleCountryGroup(countryId) {
-    const countryPlaces = document.getElementById(countryId);
-    const toggle = document.getElementById('toggle-' + countryId);
-    
-    if (!countryPlaces || !toggle) return;
-    
-    if (countryPlaces.style.display === 'none') {
-        countryPlaces.style.display = 'block';
-        toggle.textContent = '▼';
-    } else {
-        countryPlaces.style.display = 'none';
-        toggle.textContent = '▶';
-    }
-}
-
-// 更新地图标记
-function updateMapMarkers() {
-    // 清除现有标记
-    Object.values(markers).forEach(marker => map.removeLayer(marker));
-    markers = {};
-    
-    // 添加标记
-    places.forEach(place => {
-        const placeUsers = getPlaceUsers(place);
-        
-        if (currentFilter === 'user' && !placeUsers.includes(currentUser)) {
-            return;
-        }
-        if (currentFilter !== 'all' && currentFilter !== 'user' && place.type !== currentFilter) {
-            return;
-        }
-        
-        // 创建带用户头像的自定义图标
-        const borderColor = place.type === 'visited' ? '#51cf66' : '#ffd43b';
-        let iconHtml = '';
-        let popupUsersHtml = '';
-        
-        if (placeUsers.length > 1) {
-            // 多个用户，显示两个头像重叠
-            const user1Id = placeUsers[0] || 'user1';
-            const user2Id = placeUsers[1] || 'user2';
-            const user1Data = users[user1Id] || users.user1;
-            const user2Data = users[user2Id] || users.user2;
-            const user1Avatar = user1Data.avatar || getDefaultAvatar(user1Id);
-            const user2Avatar = user2Data.avatar || getDefaultAvatar(user2Id);
-            const user1Name = user1Data.name || (user1Id === 'user1' ? '用户1' : '用户2');
-            const user2Name = user2Data.name || (user2Id === 'user1' ? '用户1' : '用户2');
-            
-            iconHtml = `
-                <div style="position: relative;">
-                    <div style="display: flex; align-items: center; gap: -8px;">
-                        <img src="${user1Avatar}" style="width: 28px; height: 28px; border-radius: 50%; border: 3px solid ${borderColor}; object-fit: cover; box-shadow: 0 2px 4px rgba(0,0,0,0.3); z-index: 2;">
-                        <img src="${user2Avatar}" style="width: 28px; height: 28px; border-radius: 50%; border: 3px solid ${borderColor}; object-fit: cover; box-shadow: 0 2px 4px rgba(0,0,0,0.3); margin-left: -12px; z-index: 1;">
-                    </div>
-                    ${place.type === 'visited' ? '<div style="position: absolute; bottom: -2px; right: -2px; width: 14px; height: 14px; background: #51cf66; border-radius: 50%; border: 2px solid white; display: flex; align-items: center; justify-content: center; font-size: 8px; color: white;">✓</div>' : ''}
-                </div>
-            `;
-            
-            popupUsersHtml = `
-                <div style="display: flex; align-items: center; justify-content: center; gap: 8px; margin: 5px 0; flex-wrap: wrap;">
-                    <div style="display: flex; align-items: center; gap: 4px;">
-                        <img src="${user1Avatar}" style="width: 20px; height: 20px; border-radius: 50%; object-fit: cover;">
-                        <small>${user1Name}</small>
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 4px;">
-                        <img src="${user2Avatar}" style="width: 20px; height: 20px; border-radius: 50%; object-fit: cover;">
-                        <small>${user2Name}</small>
-                    </div>
-                </div>
-                <div style="color: #667eea; font-weight: 600; font-size: 12px; margin: 5px 0;">我们都去过</div>
-            `;
-        } else {
-            // 单个用户
-            const userId = placeUsers[0] || 'user1';
-            const userData = users[userId] || users.user1;
-            const userAvatar = userData.avatar || getDefaultAvatar(userId);
-            const userName = userData.name || (userId === 'user1' ? '用户1' : '用户2');
-            
-            iconHtml = `
-                <div style="position: relative;">
-                    <img src="${userAvatar}" style="width: 32px; height: 32px; border-radius: 50%; border: 3px solid ${borderColor}; object-fit: cover; box-shadow: 0 2px 4px rgba(0,0,0,0.3);">
-                    ${place.type === 'visited' ? '<div style="position: absolute; bottom: -2px; right: -2px; width: 14px; height: 14px; background: #51cf66; border-radius: 50%; border: 2px solid white; display: flex; align-items: center; justify-content: center; font-size: 8px; color: white;">✓</div>' : ''}
-                </div>
-            `;
-            
-            popupUsersHtml = `
-                <div style="display: flex; align-items: center; justify-content: center; gap: 6px; margin: 5px 0;">
-                    <img src="${userAvatar}" style="width: 20px; height: 20px; border-radius: 50%; object-fit: cover;">
-                    <small>${userName}</small>
-                </div>
-            `;
-        }
-        
-        const customIcon = L.divIcon({
-            html: iconHtml,
-            className: 'custom-icon',
-            iconSize: [32, 32],
-            iconAnchor: [16, 32],
-            popupAnchor: [0, -32]
-        });
-        
-        const marker = L.marker([place.lat, place.lng], { icon: customIcon })
-            .addTo(map)
-            .bindPopup(`
-                <div style="text-align: center; min-width: 150px;">
-                    <strong>${place.name}</strong><br>
-                    ${popupUsersHtml}
-                    <span style="color: ${place.type === 'visited' ? '#51cf66' : '#ffd43b'};">
-                        ${place.type === 'visited' ? '已去过' : '想去'}
-                    </span>
-                    ${place.date ? `<br><small>${formatDate(place.date)}</small>` : ''}
-                </div>
-            `);
-        
-        marker.on('click', function() {
-            showPlaceDetails(place.id);
-        });
-        
-        markers[place.id] = marker;
-    });
-}
-
-// 格式化日期
-function formatDate(dateString) {
-    if (!dateString) return '';
-    const date = new Date(dateString);
-    const year = date.getFullYear();
-    const month = date.getMonth() + 1;
-    const day = date.getDate();
-    
-    // 如果是1月1日，可能只是年份
-    if (month === 1 && day === 1) {
-        return year + '年';
-    }
-    // 如果是1号，可能只有年月
-    if (day === 1) {
-        return year + '年' + month + '月';
-    }
-    // 完整日期
-    return date.toLocaleDateString('zh-CN', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-    });
-}
-
-// 合并已有的重复地点
-function mergeDuplicatePlaces() {
-    console.log('开始合并重复地点...');
-    const merged = [];
-    const processed = new Set();
-    let mergedCount = 0;
-    
-    places.forEach((place, index) => {
-        if (processed.has(index)) return;
-        
-        // 查找所有重复的地点
-        const duplicates = [place];
-        const duplicateIndices = [index];
-        
-        for (let i = index + 1; i < places.length; i++) {
-            if (processed.has(i)) continue;
-            
-            const otherPlace = places[i];
-            // 检查名称是否相同（忽略大小写和空格）
-            const nameMatch = place.name.toLowerCase().trim() === otherPlace.name.toLowerCase().trim();
-            
-            // 检查坐标是否相近（距离小于0.1度，约11公里）
-            const distance = Math.sqrt(
-                Math.pow(place.lat - otherPlace.lat, 2) + Math.pow(place.lng - otherPlace.lng, 2)
-            );
-            const coordClose = distance < 0.1;
-            
-            if (nameMatch || coordClose) {
-                duplicates.push(otherPlace);
-                duplicateIndices.push(i);
-            }
-        }
-        
-        if (duplicates.length > 1) {
-            // 合并重复地点
-            const mergedPlace = { ...duplicates[0] };
-            
-            // 合并userIds
-            if (!mergedPlace.userIds) {
-                mergedPlace.userIds = getPlaceUsers(mergedPlace);
-            }
-            
-            duplicates.slice(1).forEach(dup => {
-                const dupUserIds = getPlaceUsers(dup);
-                dupUserIds.forEach(dupUserId => {
-                    if (!mergedPlace.userIds.includes(dupUserId)) {
-                        mergedPlace.userIds.push(dupUserId);
-                    }
-                });
-                
-                // 合并备注
-                if (dup.notes && dup.notes.trim()) {
-                    if (mergedPlace.notes && mergedPlace.notes.trim()) {
-                        mergedPlace.notes = mergedPlace.notes + '\n\n' + dup.notes;
-                    } else {
-                        mergedPlace.notes = dup.notes;
-                    }
-                }
-            });
-            
-            mergedPlace.updatedAt = Date.now();
-            merged.push(mergedPlace);
-            duplicateIndices.forEach(idx => processed.add(idx));
-            mergedCount += duplicates.length - 1;
-            console.log(`合并了 ${duplicates.length} 个重复地点: ${mergedPlace.name}，用户: ${mergedPlace.userIds.join(', ')}`);
-        } else {
-            // 没有重复，直接添加
-            merged.push(place);
-            processed.add(index);
-        }
-    });
-    
-    if (mergedCount > 0) {
-        places = merged;
-        savePlaces();
-        renderPlacesList();
-        updateMapMarkers();
-        console.log(`合并完成，共合并了 ${mergedCount} 个重复地点`);
-    } else {
-        console.log('没有发现重复地点');
-    }
-}
-
-// 保存地点到localStorage并同步到共享存储
-function savePlaces() {
-    localStorage.setItem('travelPlaces', JSON.stringify(places));
-    syncToSharedStorage();
-}
-
-// 从localStorage加载地点
-// 批量更新缺失的国家信息
-async function updateMissingCountries() {
-    const placesNeedingUpdate = places.filter(place => 
-        (!place.country || place.country === '未知' || place.country === '加载中...') && 
-        place.lat && place.lng
+  if (searchQuery) {
+    const q = searchQuery.toLowerCase();
+    list = list.filter(p =>
+      p.name.toLowerCase().includes(q) ||
+      (p.country || '').toLowerCase().includes(q)
     );
-    
-    if (placesNeedingUpdate.length === 0) {
-        return;
-    }
-    
-    console.log(`开始更新 ${placesNeedingUpdate.length} 个地点的国家信息...`);
-    
-    // 逐个更新，添加延迟以避免API限制
-    for (let i = 0; i < placesNeedingUpdate.length; i++) {
-        const place = placesNeedingUpdate[i];
-        // 添加延迟（每1秒更新一个）
-        if (i > 0) {
-            await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-        
-        const country = await getCountryFromCoordinates(place.lat, place.lng);
-        place.country = country;
-        
-        // 每更新5个地点就保存一次并刷新显示
-        if ((i + 1) % 5 === 0 || i === placesNeedingUpdate.length - 1) {
-            savePlaces();
-            renderPlacesList();
-        }
-    }
-    
-    savePlaces();
-    renderPlacesList();
-    console.log('国家信息更新完成');
+  }
+  return list;
 }
 
-function loadPlaces() {
-    const saved = localStorage.getItem('travelPlaces');
-    if (saved) {
-        try {
-            places = JSON.parse(saved);
-            // 为旧数据添加默认userId和country
-            places = places.map(place => {
-                // 兼容旧数据：将userId转换为userIds数组
-                if (!place.userIds) {
-                    if (place.userId) {
-                        place.userIds = [place.userId];
-                        delete place.userId;
-                    } else {
-                        place.userIds = ['user1'];
-                    }
-                }
-                // 如果旧数据没有country字段，标记为需要更新
-                if (!place.country && place.lat && place.lng) {
-                    place.country = '未知'; // 先显示未知，稍后批量更新
-                } else if (!place.country) {
-                    place.country = '未知';
-                }
-                return place;
-            });
-            renderPlacesList();
-            if (map) {
-                updateMapMarkers();
-            }
-            
-            // 合并已有的重复地点
-            mergeDuplicatePlaces();
-            
-            // 延迟批量更新缺失的国家信息（避免阻塞页面加载）
-            setTimeout(() => {
-                updateMissingCountries();
-            }, 2000);
-        } catch (e) {
-            console.error('加载数据失败:', e);
-        }
+function renderAll() {
+  renderStats();
+  renderSidebar();
+  refreshMarkers();
+  updateUserUI();
+}
+
+function renderStats() {
+  const visited  = state.places.filter(p => p.type === 'visited').length;
+  const wishlist = state.places.filter(p => p.type === 'wishlist').length;
+  const planned  = state.places.filter(p => p.type === 'planned').length;
+  const countries = new Set(
+    state.places.filter(p => p.type === 'visited' && p.country).map(p => p.country)
+  ).size;
+
+  document.getElementById('visitedCount').textContent  = visited;
+  document.getElementById('wishlistCount').textContent = wishlist;
+  document.getElementById('plannedCount').textContent  = planned;
+  document.getElementById('headerStats').textContent   =
+    `// ${state.places.length} locations · ${countries} countries`;
+}
+
+function renderSidebar(searchQuery) {
+  const list     = document.getElementById('placesList');
+  const filtered = getFilteredPlaces(searchQuery);
+
+  if (filtered.length === 0) {
+    list.innerHTML = `<div class="empty-msg">// no locations found<br>click [+ ADD_PLACE] to start</div>`;
+    return;
+  }
+
+  const groups = {};
+  filtered.forEach(p => {
+    const key = p.country || 'UNKNOWN';
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(p);
+  });
+
+  list.innerHTML = Object.entries(groups)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([country, places]) => `
+      <div class="country-group">
+        <div class="country-header" onclick="toggleCountry(this)">
+          <span class="country-name">${escHtml(country)}</span>
+          <span class="country-count">${places.length}</span>
+          <span class="country-toggle open">&#9658;</span>
+        </div>
+        <div class="country-places">
+          ${places.map(p => `
+            <div class="place-item ${p.type}" onclick="openDetailModal('${p.id}')">
+              <div class="place-dot ${p.type}"></div>
+              <span class="place-name">${escHtml(p.name)}</span>
+              ${p.date ? `<span class="place-date">${p.date}</span>` : ''}
+              <button class="place-plan-btn" onclick="event.stopPropagation();openTripPlanner('${p.id}',null)">+ plan</button>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `).join('');
+}
+
+function toggleCountry(header) {
+  const body   = header.nextElementSibling;
+  const toggle = header.querySelector('.country-toggle');
+  if (body.style.display === 'none') {
+    body.style.display = '';
+    toggle.classList.add('open');
+  } else {
+    body.style.display = 'none';
+    toggle.classList.remove('open');
+  }
+}
+
+// ============================================================
+//  MODAL HELPERS
+// ============================================================
+function openModal(id) {
+  document.getElementById(id + 'Overlay').classList.add('open');
+}
+
+function closeModal(id) {
+  document.getElementById(id + 'Overlay').classList.remove('open');
+}
+
+// ============================================================
+//  PLACE FORM MODAL
+// ============================================================
+function openAddPlaceModal() {
+  editingPlaceId = null;
+  document.getElementById('placeModalTitle').textContent = 'ADD_PLACE';
+  document.getElementById('placeForm').reset();
+  document.getElementById('deletePlaceBtn').style.display = 'none';
+  const userRadio = document.querySelector(`input[name="placeUser"][value="${currentUser}"]`);
+  if (userRadio) userRadio.checked = true;
+  openModal('placeModal');
+}
+
+function openEditPlaceModal(id) {
+  const place = state.places.find(p => p.id === id);
+  if (!place) return;
+  editingPlaceId = id;
+  document.getElementById('placeModalTitle').textContent = 'EDIT_PLACE';
+  document.getElementById('placeName').value    = place.name;
+  document.getElementById('placeCountry').value = place.country || '';
+  document.getElementById('placeDate').value    = place.date    || '';
+  document.getElementById('placeNotes').value   = place.notes   || '';
+  document.getElementById('placeLat').value     = place.lat;
+  document.getElementById('placeLng').value     = place.lng;
+  const typeRadio = document.querySelector(`input[name="placeType"][value="${place.type}"]`);
+  if (typeRadio) typeRadio.checked = true;
+  const userRadio = document.querySelector(`input[name="placeUser"][value="${place.addedBy || 'user1'}"]`);
+  if (userRadio) userRadio.checked = true;
+  document.getElementById('deletePlaceBtn').style.display = 'block';
+  closeModal('detailModal');
+  openModal('placeModal');
+}
+
+function handlePlaceSave(e) {
+  e.preventDefault();
+  const name    = document.getElementById('placeName').value.trim();
+  const country = document.getElementById('placeCountry').value.trim();
+  const type    = document.querySelector('input[name="placeType"]:checked')?.value;
+  const addedBy = document.querySelector('input[name="placeUser"]:checked')?.value || 'user1';
+  const date    = document.getElementById('placeDate').value;
+  const notes   = document.getElementById('placeNotes').value.trim();
+  const lat     = parseFloat(document.getElementById('placeLat').value);
+  const lng     = parseFloat(document.getElementById('placeLng').value);
+
+  if (!name || isNaN(lat) || isNaN(lng)) {
+    setStatus('error: name and coordinates are required', true);
+    return;
+  }
+
+  if (editingPlaceId) {
+    const idx = state.places.findIndex(p => p.id === editingPlaceId);
+    if (idx !== -1) {
+      state.places[idx] = { ...state.places[idx], name, country, type, addedBy, date, notes, lat, lng };
+      setStatus(`updated: ${name}`);
     }
+  } else {
+    state.places.unshift({ id: uuid(), name, country, type, addedBy, date, notes, lat, lng, trips: [] });
+    setStatus(`added: ${name}`);
+  }
+
+  saveState();
+  renderAll();
+  closeModal('placeModal');
 }
 
-// 导出数据（包含所有地点和用户信息）
-function exportData() {
-    const exportData = {
-        places: places,
-        users: users,
-        exportDate: new Date().toISOString()
-    };
-    const dataStr = JSON.stringify(exportData, null, 2);
-    const dataBlob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(dataBlob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `travel-map-data-${new Date().toISOString().split('T')[0]}.json`;
-    link.click();
-    alert('数据已导出！\n\n文件包含：\n- 所有地点记录\n- 用户信息（名称和头像）\n\n你可以将这个文件发送给对方，让对方导入即可看到你的数据。');
+function handleDeletePlace() {
+  if (!editingPlaceId) return;
+  const place = state.places.find(p => p.id === editingPlaceId);
+  if (!confirm(`DELETE "${place?.name}"? This cannot be undone.`)) return;
+  if (markers[editingPlaceId]) { markers[editingPlaceId].remove(); delete markers[editingPlaceId]; }
+  state.places = state.places.filter(p => p.id !== editingPlaceId);
+  saveState();
+  renderAll();
+  closeModal('placeModal');
+  setStatus(`deleted: ${place?.name}`);
 }
 
-// 导入数据（合并数据，不覆盖现有数据）
-function importData(file) {
-    const reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            const imported = JSON.parse(e.target.result);
-            let importedPlaces = [];
-            let importedUsers = null;
-            
-            // 支持新旧两种格式
-            if (Array.isArray(imported)) {
-                // 旧格式：只有地点数组
-                importedPlaces = imported;
-            } else if (imported.places && Array.isArray(imported.places)) {
-                // 新格式：包含地点和用户信息
-                importedPlaces = imported.places;
-                importedUsers = imported.users;
-            } else {
-                alert('数据格式不正确！');
-                return;
-            }
-            
-            // 合并地点数据（避免重复）
-            const existingIds = new Set(places.map(p => p.id));
-            let newPlacesCount = 0;
-            let updatedPlacesCount = 0;
-            
-            importedPlaces.forEach(place => {
-                const existingIndex = places.findIndex(p => p.id === place.id);
-                if (existingIndex !== -1) {
-                    // 如果ID已存在，更新数据
-                    places[existingIndex] = place;
-                    updatedPlacesCount++;
-                } else {
-                    // 新地点，添加
-                    places.push(place);
-                    newPlacesCount++;
-                }
-            });
-            
-            // 合并用户信息（如果导入的数据包含用户信息）
-            if (importedUsers) {
-                if (importedUsers.user1 && importedUsers.user1.name) {
-                    if (!users.user1.name || users.user1.name === '用户1') {
-                        users.user1.name = importedUsers.user1.name;
-                    }
-                    if (importedUsers.user1.avatar && !users.user1.avatar) {
-                        users.user1.avatar = importedUsers.user1.avatar;
-                    }
-                }
-                if (importedUsers.user2 && importedUsers.user2.name) {
-                    if (!users.user2.name || users.user2.name === '用户2') {
-                        users.user2.name = importedUsers.user2.name;
-                    }
-                    if (importedUsers.user2.avatar && !users.user2.avatar) {
-                        users.user2.avatar = importedUsers.user2.avatar;
-                    }
-                }
-                saveUsers();
-            }
-            
-            savePlaces();
-            renderPlacesList();
-            updateMapMarkers();
-            
-            alert(`数据导入成功！\n\n新增地点：${newPlacesCount} 个\n更新地点：${updatedPlacesCount} 个\n总计地点：${places.length} 个`);
-        } catch (e) {
-            alert('导入失败：' + e.message);
-        }
-    };
-    reader.readAsText(file);
+// ============================================================
+//  DETAIL MODAL
+// ============================================================
+function openDetailModal(id) {
+  const place = state.places.find(p => p.id === id);
+  if (!place) return;
+
+  document.getElementById('detailTitle').textContent = place.name.toUpperCase();
+
+  const userName = state.users[place.addedBy]?.name || place.addedBy || '';
+  const trips    = place.trips || [];
+
+  const tripsHtml = trips.length === 0
+    ? `<div class="no-trips-msg">
+         &#9992;&#65039; 还没有行程计划<br>
+         <button class="btn btn-blue btn-sm" style="margin-top:10px" onclick="openTripPlanner('${id}',null)">+ 规划行程</button>
+       </div>`
+    : trips.map(trip => buildTripCardHtml(id, trip)).join('');
+
+  document.getElementById('detailBody').innerHTML = `
+    <div class="detail-name">${escHtml(place.name)}</div>
+    <div class="detail-meta">
+      <span class="detail-chip ${place.type}">${place.type.toUpperCase()}</span>
+      ${place.country ? `<span class="detail-meta-item">&#128205; ${escHtml(place.country)}</span>` : ''}
+      ${place.date    ? `<span class="detail-meta-item">&#128197; ${place.date}</span>` : ''}
+      ${userName      ? `<span class="detail-meta-item">&#128100; ${escHtml(userName)}</span>` : ''}
+    </div>
+    ${place.notes ? `<div class="detail-notes">${escHtml(place.notes)}</div>` : ''}
+    <div class="detail-actions">
+      <button class="btn btn-ghost btn-sm" onclick="openEditPlaceModal('${id}')">&#9998; EDIT_PLACE</button>
+      <button class="btn btn-primary btn-sm" onclick="openTripPlanner('${id}', null)">+ PLAN_TRIP</button>
+    </div>
+    <div class="trips-section">
+      <div class="trips-header">
+        <span class="trips-label">TRIP PLANS</span>
+        <span style="font-size:10px;color:var(--text-muted)">${trips.length} saved</span>
+      </div>
+      ${tripsHtml}
+    </div>
+  `;
+
+  openModal('detailModal');
+  map.flyTo([place.lat, place.lng], Math.max(map.getZoom(), 6), { duration: 0.8 });
 }
 
-// 根据名称搜索地点坐标（地理编码）
-async function searchLocationByName() {
-    const placeName = document.getElementById('placeName').value.trim();
-    
-    if (!placeName) {
-        alert('请输入地点名称！');
-        return;
+function buildTripCardHtml(placeId, trip) {
+  const daysHtml = trip.days.map(day => {
+    const itemsHtml = day.items.length === 0
+      ? `<div style="color:var(--text-muted);font-size:11px;padding:2px 8px">// empty day</div>`
+      : day.items.map(item => {
+          const cfg = ITEM_TYPES[item.type] || ITEM_TYPES.other;
+          return `
+            <div class="day-item-row">
+              <div class="item-dot" style="background:${cfg.color}"></div>
+              <span class="item-time">${item.time || ''}</span>
+              <span class="item-emoji">${cfg.emoji}</span>
+              <span class="item-title">${escHtml(item.title)}</span>
+              <span class="item-type-label">${cfg.label}</span>
+            </div>`;
+        }).join('');
+    return `
+      <div class="day-block">
+        <div class="day-label">DAY ${day.dayNumber} &nbsp;// ${day.date} &nbsp;${getDow(day.date)}</div>
+        <div class="day-items">${itemsHtml}</div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="trip-card">
+      <div class="trip-card-header">
+        <div>
+          <div class="trip-dates">${trip.startDate} &#8594; ${trip.endDate}</div>
+          <div class="trip-duration">${trip.days.length} day${trip.days.length !== 1 ? 's' : ''}</div>
+        </div>
+        <div class="trip-card-btns">
+          <button class="btn btn-ghost btn-sm" onclick="openTripPlanner('${placeId}','${trip.id}')">EDIT</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteTrip('${placeId}','${trip.id}')">DEL</button>
+        </div>
+      </div>
+      ${daysHtml}
+    </div>`;
+}
+
+function deleteTrip(placeId, tripId) {
+  if (!confirm('Delete this trip plan?')) return;
+  const place = state.places.find(p => p.id === placeId);
+  if (!place) return;
+  place.trips = place.trips.filter(t => t.id !== tripId);
+  saveState();
+  openDetailModal(placeId);
+  setStatus('deleted: trip plan');
+}
+
+// ============================================================
+//  TRIP PLANNER MODAL
+// ============================================================
+
+// In-memory state for the planner (not saved until SAVE is clicked)
+let plannerSuggestions = [];   // [{id, type, emoji, title, note, suggestedDay}]
+let plannerDays        = [];   // [{dayNumber, date, items:[{id,type,emoji,title,time}]}]
+let plannerChatHistory = [];   // Anthropic message format
+
+function openTripPlanner(placeId, existingTripId) {
+  tripPlaceId = placeId;
+  tripEditId  = existingTripId;
+  const place = state.places.find(p => p.id === placeId);
+  if (!place) return;
+
+  document.getElementById('tripModalTitle').textContent = `PLAN: ${place.name.toUpperCase()}`;
+
+  const trip = existingTripId
+    ? (place.trips || []).find(t => t.id === existingTripId)
+    : null;
+
+  // Reset planner state
+  plannerSuggestions = [];
+  plannerChatHistory = [];
+  plannerDays = trip
+    ? trip.days.map(d => ({ ...d, items: d.items.map(i => ({ ...i })) }))
+    : [];
+
+  renderTripPlannerForm(trip);
+  closeModal('detailModal');
+  openModal('tripModal');
+}
+
+function renderTripPlannerForm(trip) {
+  const startDate = trip?.startDate || '';
+  const endDate   = trip?.endDate   || '';
+
+  document.getElementById('tripModalBody').innerHTML = `
+    <div class="planner-top-row">
+      <div class="planner-date-group">
+        <div class="field-row">
+          <label>START DATE</label>
+          <input type="date" id="tripStart" value="${startDate}">
+        </div>
+        <div class="field-row">
+          <label>END DATE</label>
+          <input type="date" id="tripEnd" value="${endDate}">
+        </div>
+        <button class="btn btn-ghost btn-sm" style="align-self:flex-end" onclick="initPlannerDays()">GENERATE DAYS</button>
+      </div>
+      <button class="btn btn-primary btn-sm" style="align-self:flex-end" onclick="aiGenerate()">✦ AI SUGGEST</button>
+    </div>
+
+    <div class="planner-columns" id="plannerColumns">
+      <!-- LEFT: Suggestions -->
+      <div class="suggestions-panel">
+        <div class="sug-header">
+          <span class="sug-label">✦ AI SUGGESTIONS</span>
+          <span class="sug-count" id="sugCount">0 items</span>
+        </div>
+        <div class="sug-list" id="sugList">
+          <div class="sug-empty">
+            Set dates → click <strong>GENERATE DAYS</strong><br>
+            Then click <strong>✦ AI SUGGEST</strong> to get ideas<br>
+            or type a request below ↓
+          </div>
+        </div>
+        <div class="sug-chat">
+          <input id="sugChatInput" type="text" placeholder="e.g. best tapas, hidden gems, romantic dinner...">
+          <button class="btn btn-ghost btn-sm" onclick="aiChat()">SEND</button>
+        </div>
+      </div>
+
+      <!-- RIGHT: Day planner -->
+      <div class="days-panel" id="daysPanel">
+        <div class="days-empty">Generate days to start planning →</div>
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveTripPlan()">SAVE TRIP</button>
+      <button class="btn btn-ghost" onclick="closeTripPlanner()">CANCEL</button>
+    </div>
+  `;
+
+  if (plannerDays.length > 0) renderDaysPanel();
+}
+
+// ── Day management ──────────────────────────────
+function initPlannerDays() {
+  const startStr = document.getElementById('tripStart').value;
+  const endStr   = document.getElementById('tripEnd').value;
+  if (!startStr || !endStr) { setStatus('error: set both dates first', true); return; }
+  const start = new Date(startStr), end = new Date(endStr);
+  if (end < start) { setStatus('error: end before start', true); return; }
+  if (plannerDays.length > 0 && !confirm('Regenerate days? Planned items will be lost.')) return;
+
+  plannerDays = [];
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    plannerDays.push({ dayNumber: plannerDays.length + 1, date: d.toISOString().slice(0, 10), items: [] });
+  }
+  renderDaysPanel();
+  setStatus(`${plannerDays.length} days ready`);
+}
+
+function renderDaysPanel() {
+  const panel = document.getElementById('daysPanel');
+  if (!panel) return;
+  if (!plannerDays.length) {
+    panel.innerHTML = `<div class="days-empty">Generate days to start planning →</div>`;
+    return;
+  }
+
+  panel.innerHTML = plannerDays.map((day, i) => `
+    <div class="day-plan-block">
+      <div class="day-plan-header">
+        <span class="day-plan-badge">DAY ${day.dayNumber}</span>
+        <span class="day-plan-date">${day.date} · ${getDow(day.date)}</span>
+      </div>
+      <div class="day-plan-items" id="dayItems_${i}">
+        ${day.items.length === 0
+          ? `<div class="day-plan-empty">// assign items from suggestions →</div>`
+          : day.items.map(item => buildDayItemHtml(i, item)).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+
+function buildDayItemHtml(dayIdx, item) {
+  const cfg = ITEM_TYPES[item.type] || ITEM_TYPES.other;
+  return `
+    <div class="day-plan-item" id="dpi_${item.id}">
+      <span class="dpi-emoji">${cfg.emoji}</span>
+      <span class="dpi-title">${escHtml(item.title)}</span>
+      <input class="dpi-time" type="time" value="${item.time || ''}"
+        onchange="updateItemTime(${dayIdx},'${item.id}',this.value)">
+      <button class="dpi-remove" onclick="removeDayItem(${dayIdx},'${item.id}')">&times;</button>
+    </div>`;
+}
+
+function updateItemTime(dayIdx, itemId, time) {
+  const item = plannerDays[dayIdx]?.items.find(i => i.id === itemId);
+  if (item) item.time = time;
+}
+
+function removeDayItem(dayIdx, itemId) {
+  if (!plannerDays[dayIdx]) return;
+  plannerDays[dayIdx].items = plannerDays[dayIdx].items.filter(i => i.id !== itemId);
+  const container = document.getElementById(`dayItems_${dayIdx}`);
+  if (container) {
+    const el = document.getElementById(`dpi_${itemId}`);
+    if (el) el.remove();
+    if (plannerDays[dayIdx].items.length === 0) {
+      container.innerHTML = `<div class="day-plan-empty">// assign items from suggestions →</div>`;
     }
-    
-    const searchBtn = document.getElementById('searchLocationBtn');
-    const originalText = searchBtn.innerHTML;
-    searchBtn.disabled = true;
-    searchBtn.innerHTML = '🔍 搜索中...';
-    
-    try {
-        // 使用OpenStreetMap Nominatim API进行地理编码（英文）
-        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(placeName)}&limit=1&accept-language=en`;
-        
-        const response = await fetch(url, {
-            headers: {
-                'User-Agent': 'TravelMapApp/1.0' // Nominatim要求设置User-Agent
-            }
-        });
-        
-        if (!response.ok) {
-            throw new Error('搜索失败，请稍后重试');
-        }
-        
-        const data = await response.json();
-        
-        if (data && data.length > 0) {
-            const result = data[0];
-            const lat = parseFloat(result.lat);
-            const lng = parseFloat(result.lon);
-            
-            // 填充坐标
-            document.getElementById('placeLat').value = lat.toFixed(6);
-            document.getElementById('placeLng').value = lng.toFixed(6);
-            
-            // 在地图上显示位置
-            showLocationOnMap(lat, lng);
-            
-            // 如果地点名称与搜索结果不同，可以更新名称（可选）
-            const displayName = result.display_name.split(',')[0]; // 使用更简洁的名称
-            if (displayName && displayName !== placeName) {
-                // 可以选择是否自动更新名称，这里先不自动更新，让用户决定
-            }
-            
-            searchBtn.innerHTML = '✅ 已找到';
-            setTimeout(() => {
-                searchBtn.innerHTML = originalText;
-            }, 2000);
-        } else {
-            alert('未找到该地点，请尝试使用更具体的地点名称（如：北京、Paris、Tokyo）或手动输入坐标。');
-            searchBtn.innerHTML = originalText;
-        }
-    } catch (error) {
-        console.error('地理编码错误:', error);
-        alert('搜索失败：' + error.message + '\n\n请尝试：\n1. 检查网络连接\n2. 使用更具体的地点名称\n3. 手动输入坐标或在地图上点击选择位置');
-        searchBtn.innerHTML = originalText;
-    } finally {
-        searchBtn.disabled = false;
-    }
+  }
 }
 
-// 在地图上显示位置
-function showLocationOnMap(lat, lng) {
-    // 清除之前的搜索标记
-    clearSearchMarker();
-    
-    // 创建临时标记显示搜索结果
-    const tempIcon = L.divIcon({
-        html: '<div style="background-color: #667eea; width: 20px; height: 20px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>',
-        className: 'temp-search-icon',
-        iconSize: [20, 20],
-        iconAnchor: [10, 10]
+function assignToDay(sugId, dayIdx) {
+  const sug = plannerSuggestions.find(s => s.id === sugId);
+  if (!sug || dayIdx < 0 || dayIdx >= plannerDays.length) return;
+
+  const item = { id: uuid(), type: sug.type, emoji: sug.emoji, title: sug.title, time: '' };
+  plannerDays[dayIdx].items.push(item);
+
+  // Remove from suggestions
+  plannerSuggestions = plannerSuggestions.filter(s => s.id !== sugId);
+  renderSuggestionsPanel();
+
+  // Update day panel
+  const container = document.getElementById(`dayItems_${dayIdx}`);
+  if (container) {
+    const empty = container.querySelector('.day-plan-empty');
+    if (empty) empty.remove();
+    container.insertAdjacentHTML('beforeend', buildDayItemHtml(dayIdx, item));
+  }
+}
+
+// ── Suggestions panel ───────────────────────────
+function renderSuggestionsPanel() {
+  const list = document.getElementById('sugList');
+  const count = document.getElementById('sugCount');
+  if (!list) return;
+  if (count) count.textContent = `${plannerSuggestions.length} items`;
+
+  if (!plannerSuggestions.length) {
+    list.innerHTML = `<div class="sug-empty">// no suggestions yet — click ✦ AI SUGGEST or type a request below</div>`;
+    return;
+  }
+
+  const dayOptions = plannerDays.map((d, i) =>
+    `<option value="${i}">→ Day ${d.dayNumber} (${d.date.slice(5)})</option>`
+  ).join('');
+
+  list.innerHTML = plannerSuggestions.map(s => `
+    <div class="sug-item" id="sug_${s.id}">
+      <div class="sug-main" onclick="toggleSugDetail('${s.id}')">
+        <span class="sug-emoji">${s.emoji}</span>
+        <div class="sug-info">
+          <span class="sug-title">${escHtml(s.title)}</span>
+          ${s.note ? `<span class="sug-note">${escHtml(s.note)}</span>` : ''}
+        </div>
+        <div class="sug-controls" onclick="event.stopPropagation()">
+          <select class="sug-day-select" onchange="if(this.value!=='')assignToDay('${s.id}',parseInt(this.value));this.value=''">
+            <option value="">+ 加入</option>
+            ${dayOptions}
+          </select>
+          <button class="sug-del" onclick="removeSuggestion('${s.id}')">&times;</button>
+        </div>
+        <span class="sug-expand-icon" id="sugIcon_${s.id}">▶</span>
+      </div>
+      <div class="sug-detail" id="sugDetail_${s.id}">
+        <div class="sug-img-wrap" id="sugImg_${s.id}">
+          <div class="sug-img-loading">// 加载图片...</div>
+        </div>
+        <p class="sug-detail-text">${escHtml(s.detailCn || s.note || '')}</p>
+      </div>
+    </div>
+  `).join('');
+}
+
+function removeSuggestion(id) {
+  plannerSuggestions = plannerSuggestions.filter(s => s.id !== id);
+  renderSuggestionsPanel();
+}
+
+function toggleSugDetail(id) {
+  const detail = document.getElementById(`sugDetail_${id}`);
+  const icon   = document.getElementById(`sugIcon_${id}`);
+  if (!detail) return;
+  const open = detail.classList.toggle('open');
+  if (icon) icon.textContent = open ? '▼' : '▶';
+  if (open) loadSugImage(id);
+}
+
+async function loadSugImage(id) {
+  const sug  = plannerSuggestions.find(s => s.id === id);
+  const wrap = document.getElementById(`sugImg_${id}`);
+  if (!wrap || wrap.dataset.loaded) return;
+  wrap.dataset.loaded = '1';
+
+  if (!sug?.wikiQuery) { wrap.style.display = 'none'; return; }
+  try {
+    const q   = encodeURIComponent(sug.wikiQuery);
+    const res = await fetch(`https://en.wikipedia.org/w/api.php?action=query&titles=${q}&prop=pageimages&format=json&pithumbsize=500&origin=*`);
+    const data = await res.json();
+    const page = Object.values(data.query?.pages || {})[0];
+    const src  = page?.thumbnail?.source;
+    if (src) {
+      wrap.innerHTML = `<img src="${src}" alt="${escHtml(sug.title)}" class="sug-img">`;
+    } else {
+      wrap.style.display = 'none';
+    }
+  } catch {
+    wrap.style.display = 'none';
+  }
+}
+
+// ── AI functions ────────────────────────────────
+function getApiKey() {
+  return localStorage.getItem('ai_api_key') || localStorage.getItem('anthropic_key') || '';
+}
+
+async function aiGenerate() {
+  if (!plannerDays.length) { setStatus('generate days first, then AI suggest', true); return; }
+  const key = getApiKey();
+  if (!key) { setStatus('add your Claude API key in ⚙ User Settings', true); return; }
+
+  const place = state.places.find(p => p.id === tripPlaceId);
+  const start = document.getElementById('tripStart').value;
+  const end   = document.getElementById('tripEnd').value;
+
+  // Reset chat history for fresh generation
+  plannerChatHistory = [];
+
+  const list = document.getElementById('sugList');
+  list.innerHTML = `<div class="ai-loading">
+    <div class="ai-dot"></div><div class="ai-dot"></div><div class="ai-dot"></div>
+    <span>AI is generating suggestions for ${place?.name}...</span>
+  </div>`;
+
+  const prompt = `你是一名旅行专家，帮助一对情侣规划去${place?.name || '目的地'}的${plannerDays.length}天旅行（${start} 至 ${end}）。
+
+请生成恰好18个具体的游玩建议，涵盖：必看景点、当地特色餐厅（含真实名称）、住宿推荐、交通提示和浪漫体验。
+
+只返回一个 JSON 数组，不要其他文字：
+[{"type":"attraction","emoji":"⛪","title":"圣家堂（Sagrada Família）","note":"提前两周网上购票","detailCn":"高迪设计的传世杰作，融合了自然与宗教美学。彩色玻璃在阳光下将整个教堂染成绚丽色彩，日落时分尤为壮观。推荐购买登塔票，可俯瞰整个巴塞罗那全景。","wikiQuery":"Sagrada Familia Barcelona","suggestedDay":1}]
+
+规则：
+- type: attraction / food / hotel / transport / other
+- emoji: 一个相关 emoji
+- title: 具体地点中文名（括号内注原文），不要泛泛的描述
+- note: 一句实用小提示（15字以内）
+- detailCn: 2-3句详细介绍，包含看点、氛围和实用信息，适合情侣
+- wikiQuery: 用于搜索图片的英文关键词（如 "Sagrada Familia Barcelona"）
+- suggestedDay: 分散在第1天至第${plannerDays.length}天
+- 以浪漫、有趣、有记忆点为核心`;
+
+  try {
+    const suggestions = await callClaude([{ role: 'user', content: prompt }], key);
+    plannerChatHistory.push(
+      { role: 'user', content: prompt },
+      { role: 'assistant', content: JSON.stringify(suggestions) }
+    );
+    plannerSuggestions = suggestions.map(s => ({ ...s, id: uuid() }));
+    renderSuggestionsPanel();
+    setStatus(`AI generated ${suggestions.length} suggestions for ${place?.name}`);
+  } catch (e) {
+    list.innerHTML = `<div class="sug-empty" style="color:var(--red)">AI error: ${escHtml(e.message)}</div>`;
+    setStatus('AI error: ' + e.message, true);
+  }
+}
+
+async function aiChat() {
+  const input = document.getElementById('sugChatInput');
+  const msg   = input?.value.trim();
+  if (!msg) return;
+  const key = getApiKey();
+  if (!key) { setStatus('add your Claude API key in ⚙ User Settings', true); return; }
+
+  input.value = '';
+  input.disabled = true;
+
+  const place = state.places.find(p => p.id === tripPlaceId);
+  const alreadyHave = [...plannerSuggestions, ...plannerDays.flatMap(d => d.items)]
+    .map(i => i.title).join(', ');
+
+  const userMsg = `用户请求："${msg}"
+已有建议/计划：${alreadyHave || '暂无'}。
+请为${place?.name}再添加5-8个符合该请求的建议，避免重复。
+只返回 JSON 数组：[{"type":"...","emoji":"...","title":"...","note":"...","detailCn":"...","wikiQuery":"...","suggestedDay":1}]`;
+
+  try {
+    const messages = [...plannerChatHistory, { role: 'user', content: userMsg }];
+    const newSuggestions = await callClaude(messages, key);
+    plannerChatHistory.push(
+      { role: 'user', content: userMsg },
+      { role: 'assistant', content: JSON.stringify(newSuggestions) }
+    );
+    plannerSuggestions = [...plannerSuggestions, ...newSuggestions.map(s => ({ ...s, id: uuid() }))];
+    renderSuggestionsPanel();
+    setStatus(`added ${newSuggestions.length} more suggestions`);
+  } catch (e) {
+    setStatus('AI error: ' + e.message, true);
+  } finally {
+    if (input) input.disabled = false;
+  }
+}
+
+async function callClaude(messages, apiKey) {
+  const res = await fetch('https://api.deepseek.com/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: 'deepseek-chat',
+      max_tokens: 2048,
+      messages,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `API error ${res.status}`);
+  }
+
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content || '';
+  const match = text.match(/\[[\s\S]*\]/);
+  if (!match) throw new Error('no JSON array in response');
+  return JSON.parse(match[0]);
+}
+
+// ── Save ─────────────────────────────────────────
+function closeTripPlanner() {
+  closeModal('tripModal');
+  if (tripPlaceId) openDetailModal(tripPlaceId);
+}
+
+function saveTripPlan() {
+  const startDate = document.getElementById('tripStart')?.value;
+  const endDate   = document.getElementById('tripEnd')?.value;
+  if (!startDate || !endDate) { setStatus('error: set dates', true); return; }
+  if (!plannerDays.length)   { setStatus('error: generate days first', true); return; }
+
+  const place = state.places.find(p => p.id === tripPlaceId);
+  if (!place) return;
+  if (!place.trips) place.trips = [];
+
+  const tripData = { startDate, endDate, days: plannerDays };
+
+  if (tripEditId) {
+    const idx = place.trips.findIndex(t => t.id === tripEditId);
+    if (idx !== -1) place.trips[idx] = { ...place.trips[idx], ...tripData };
+    else place.trips.push({ id: uuid(), ...tripData });
+  } else {
+    place.trips.push({ id: uuid(), ...tripData });
+  }
+
+  saveState();
+  closeModal('tripModal');
+  openDetailModal(tripPlaceId);
+  setStatus(`saved trip plan for ${place.name}`);
+}
+
+// ============================================================
+//  USER MODAL
+// ============================================================
+function openUserModal() {
+  document.getElementById('user1NameInput').value = state.users.user1.name || '';
+  document.getElementById('user2NameInput').value = state.users.user2.name || '';
+  document.getElementById('claudeKeyInput').value = localStorage.getItem('ai_api_key') || localStorage.getItem('anthropic_key') || '';
+  openModal('userModal');
+}
+
+function saveUsers() {
+  state.users.user1.name = document.getElementById('user1NameInput').value.trim() || 'USER_1';
+  state.users.user2.name = document.getElementById('user2NameInput').value.trim() || 'USER_2';
+  const apiKey = document.getElementById('claudeKeyInput').value.trim();
+  if (apiKey) localStorage.setItem('ai_api_key', apiKey);
+  else localStorage.removeItem('ai_api_key');
+  saveState();
+  updateUserUI();
+  closeModal('userModal');
+  setStatus('saved: user settings');
+}
+
+function updateUserUI() {
+  const u1 = state.users.user1.name;
+  const u2 = state.users.user2.name;
+  document.getElementById('user1ChipName').textContent = u1.slice(0, 8).toUpperCase();
+  document.getElementById('user2ChipName').textContent = u2.slice(0, 8).toUpperCase();
+  document.getElementById('formUser1Name').textContent = u1;
+  document.getElementById('formUser2Name').textContent = u2;
+}
+
+function switchUser(userId) {
+  currentUser = userId;
+  document.querySelectorAll('.user-chip').forEach(c => c.classList.remove('active'));
+  document.getElementById(userId + 'Chip').classList.add('active');
+  const radio = document.querySelector(`input[name="placeUser"][value="${userId}"]`);
+  if (radio) radio.checked = true;
+  setStatus(`switched to: ${state.users[userId].name}`);
+}
+
+// ============================================================
+//  SEARCH / GEOCODE
+// ============================================================
+async function searchLocation() {
+  const name = document.getElementById('placeName').value.trim();
+  if (!name) { setStatus('error: enter a place name first', true); return; }
+  setStatus(`searching: ${name}...`);
+
+  try {
+    const res  = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(name)}&limit=1`);
+    const data = await res.json();
+    if (!data.length) { setStatus(`not found: ${name}`, true); return; }
+
+    const { lat, lon, display_name } = data[0];
+    document.getElementById('placeLat').value = parseFloat(lat).toFixed(5);
+    document.getElementById('placeLng').value = parseFloat(lon).toFixed(5);
+
+    if (!document.getElementById('placeCountry').value) {
+      const parts = display_name.split(', ');
+      document.getElementById('placeCountry').value = parts[parts.length - 1];
+    }
+
+    map.flyTo([lat, lon], 8, { duration: 1 });
+    setStatus(`found: ${name} @ ${parseFloat(lat).toFixed(3)}, ${parseFloat(lon).toFixed(3)}`);
+  } catch {
+    setStatus('error: geocoding failed', true);
+  }
+}
+
+function getCurrentLocation() {
+  if (!navigator.geolocation) { setStatus('error: geolocation not supported', true); return; }
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      document.getElementById('placeLat').value = pos.coords.latitude.toFixed(5);
+      document.getElementById('placeLng').value = pos.coords.longitude.toFixed(5);
+      setStatus('gps: location acquired');
+    },
+    () => setStatus('error: geolocation denied', true)
+  );
+}
+
+
+// ============================================================
+//  UTILITIES
+// ============================================================
+function setStatus(msg, isError = false) {
+  const el = document.getElementById('statusMsg');
+  el.textContent = `> ${msg}`;
+  el.style.color = isError ? 'var(--red)' : 'var(--green)';
+  setTimeout(() => {
+    el.textContent = '> ready';
+    el.style.color = '';
+  }, 3500);
+}
+
+function getDow(dateStr) {
+  if (!dateStr) return '';
+  return WEEKDAYS[new Date(dateStr).getDay()] || '';
+}
+
+function escHtml(str) {
+  if (typeof str !== 'string') return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ============================================================
+//  SUPABASE SYNC
+// ============================================================
+function initSync() {
+  const cfg = getSyncConfig();
+  if (!cfg) return;
+  connectSync(cfg.url, cfg.key);
+}
+
+function getSyncConfig() {
+  try { return JSON.parse(localStorage.getItem(SYNC_CONFIG_KEY)); } catch { return null; }
+}
+
+async function connectSync(url, key) {
+  if (!window.supabase) return;
+  try {
+    supabaseClient = window.supabase.createClient(url, key);
+    setSyncDot('loading');
+
+    // Load remote data first
+    const { data, error } = await supabaseClient
+      .from('worldmap_data')
+      .select('data')
+      .eq('id', 'main')
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (data?.data) {
+      mergeRemoteState(data.data);
+      saveState();
+      renderAll();
+    } else {
+      // First time: push local data to remote
+      await pushToSupabase();
+    }
+
+    // Subscribe to real-time changes
+    if (syncChannel) syncChannel.unsubscribe();
+    syncChannel = supabaseClient
+      .channel('worldmap-sync')
+      .on('postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'worldmap_data' },
+        payload => {
+          if (payload.new?.data) {
+            mergeRemoteState(payload.new.data);
+            saveState();
+            renderAll();
+            setStatus('synced from partner ♡');
+          }
+        }
+      )
+      .subscribe(status => {
+        setSyncDot(status === 'SUBSCRIBED' ? 'ok' : 'loading');
+      });
+
+    setSyncDot('ok');
+    setStatus('cloud sync connected ♡');
+    document.getElementById('syncStatusMsg').textContent = '✓ Connected — changes sync automatically';
+  } catch (e) {
+    setSyncDot('err');
+    setStatus('sync error: ' + (e.message || e), true);
+    document.getElementById('syncStatusMsg').textContent = '✗ Error: ' + (e.message || e);
+  }
+}
+
+async function pushToSupabase() {
+  if (!supabaseClient) return;
+  try {
+    const { error } = await supabaseClient
+      .from('worldmap_data')
+      .upsert({ id: 'main', data: state, updated_at: new Date().toISOString() });
+    if (error) throw error;
+    setSyncDot('ok');
+  } catch (e) {
+    setSyncDot('err');
+    console.error('Sync push failed:', e);
+  }
+}
+
+function mergeRemoteState(remote) {
+  // Remote wins for places (last-write-wins by updated_at, simple merge)
+  if (remote.places) {
+    const localMap  = Object.fromEntries(state.places.map(p => [p.id, p]));
+    const remoteMap = Object.fromEntries(remote.places.map(p => [p.id, p]));
+    const merged    = { ...localMap, ...remoteMap };
+    state.places = Object.values(merged);
+  }
+  if (remote.users) {
+    state.users = { ...state.users, ...remote.users };
+  }
+}
+
+function setSyncDot(status) {
+  const dot = document.getElementById('syncDot');
+  if (!dot) return;
+  dot.className = 'sync-dot' + (status ? ' ' + status : '');
+}
+
+function openSyncModal() {
+  const cfg = getSyncConfig();
+  document.getElementById('sbUrl').value = cfg?.url || '';
+  document.getElementById('sbKey').value = cfg?.key || '';
+
+  const msgEl = document.getElementById('syncStatusMsg');
+  if (supabaseClient) {
+    const shareCode = btoa(JSON.stringify(cfg));
+    msgEl.innerHTML = `
+      <div style="color:var(--green);font-weight:700;margin-bottom:8px">✓ 已连接</div>
+      <div style="font-size:10px;color:var(--text-dim);margin-bottom:4px">把下面这串分享给对方，她直接粘贴就能连接同一个数据库：</div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input readonly value="${shareCode}"
+          style="flex:1;font-size:10px;padding:5px 8px;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--font);cursor:text"
+          onclick="this.select()">
+        <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText('${shareCode}');this.textContent='✓ copied'">copy</button>
+      </div>`;
+  } else if (cfg) {
+    msgEl.innerHTML = `<div style="color:var(--amber)">⚠ 有保存的配置但未连接，点 CONNECT 重试</div>`;
+    // try pasting share code
+  } else {
+    msgEl.innerHTML = `
+      <div style="color:var(--text-muted);margin-bottom:8px">○ 未连接</div>
+      <div style="font-size:10px;color:var(--text-muted)">如果对方已经连接，可以粘贴她分享的 code：</div>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <input id="shareCodeInput" placeholder="粘贴 share code..."
+          style="flex:1;font-size:10px;padding:5px 8px;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--font)">
+        <button class="btn btn-primary btn-sm" onclick="importShareCode()">导入</button>
+      </div>`;
+  }
+  openModal('syncModal');
+}
+
+function importShareCode() {
+  const code = document.getElementById('shareCodeInput')?.value.trim();
+  if (!code) return;
+  try {
+    const cfg = JSON.parse(atob(code));
+    if (!cfg.url || !cfg.key) throw new Error('invalid');
+    document.getElementById('sbUrl').value = cfg.url;
+    document.getElementById('sbKey').value = cfg.key;
+    setStatus('share code imported — click CONNECT');
+  } catch {
+    setStatus('error: invalid share code', true);
+  }
+}
+
+async function saveSyncConfig() {
+  const url = document.getElementById('sbUrl').value.trim();
+  const key = document.getElementById('sbKey').value.trim();
+  if (!url || !key) { setStatus('error: fill in both URL and key', true); return; }
+  localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify({ url, key }));
+  await connectSync(url, key);
+  closeModal('syncModal');
+}
+
+function clearSyncConfig() {
+  if (!confirm('Disconnect cloud sync?')) return;
+  localStorage.removeItem(SYNC_CONFIG_KEY);
+  if (syncChannel) { syncChannel.unsubscribe(); syncChannel = null; }
+  supabaseClient = null;
+  setSyncDot('');
+  closeModal('syncModal');
+  setStatus('sync disconnected');
+}
+
+// Note: saveState is defined in DATA section and calls pushToSupabase if connected
+
+// ============================================================
+//  EVENT LISTENERS
+// ============================================================
+function setupEventListeners() {
+  // Header controls
+  document.getElementById('addPlaceBtn').addEventListener('click', openAddPlaceModal);
+  document.getElementById('userSettingsBtn').addEventListener('click', openUserModal);
+  document.getElementById('syncSetupBtn').addEventListener('click', openSyncModal);
+  document.getElementById('syncModalClose').addEventListener('click', () => closeModal('syncModal'));
+  document.getElementById('saveSyncBtn').addEventListener('click', saveSyncConfig);
+  document.getElementById('cancelSyncBtn').addEventListener('click', () => closeModal('syncModal'));
+  document.getElementById('clearSyncBtn').addEventListener('click', clearSyncConfig);
+
+  // Filter buttons
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentFilter = btn.dataset.filter;
+      renderAll();
     });
-    
-    searchMarker = L.marker([lat, lng], { icon: tempIcon })
-        .addTo(map)
-        .bindPopup('搜索结果位置')
-        .openPopup();
-    
-    // 移动地图视图到该位置
-    map.setView([lat, lng], 10);
+  });
+
+  // Sidebar search
+  document.getElementById('sidebarSearch').addEventListener('input', e => {
+    renderSidebar(e.target.value);
+  });
+
+  // Place form
+  document.getElementById('placeForm').addEventListener('submit', handlePlaceSave);
+  document.getElementById('placeModalClose').addEventListener('click', () => closeModal('placeModal'));
+  document.getElementById('placeModalCancelBtn').addEventListener('click', () => closeModal('placeModal'));
+  document.getElementById('deletePlaceBtn').addEventListener('click', handleDeletePlace);
+  document.getElementById('searchBtn').addEventListener('click', searchLocation);
+  document.getElementById('geoLocBtn').addEventListener('click', getCurrentLocation);
+
+  // Detail modal
+  document.getElementById('detailModalClose').addEventListener('click', () => closeModal('detailModal'));
+
+  // Trip modal
+  document.getElementById('tripModalClose').addEventListener('click', closeTripPlanner);
+
+  // User modal
+  document.getElementById('userModalClose').addEventListener('click', () => closeModal('userModal'));
+  document.getElementById('saveUsersBtn').addEventListener('click', saveUsers);
+  document.getElementById('cancelUsersBtn').addEventListener('click', () => closeModal('userModal'));
+
+  // Close overlay on backdrop click
+  ['placeModal', 'detailModal', 'tripModal', 'userModal', 'syncModal'].forEach(id => {
+    document.getElementById(id + 'Overlay').addEventListener('click', e => {
+      if (e.target === e.currentTarget) {
+        if (id === 'tripModal') closeTripPlanner();
+        else closeModal(id);
+      }
+    });
+  });
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      if (document.getElementById('tripModalOverlay').classList.contains('open')) {
+        closeTripPlanner();
+      } else {
+        ['detailModal', 'placeModal', 'userModal', 'syncModal'].forEach(closeModal);
+      }
+    }
+  });
 }
-
-// 清除搜索标记
-function clearSearchMarker() {
-    if (searchMarker) {
-        map.removeLayer(searchMarker);
-        searchMarker = null;
-    }
-}
-
-// ========== 自动同步功能 ==========
-
-// 从云端加载数据（简单API方式）
-async function loadFromCloud() {
-    if (!syncApiUrl) return;
-    
-    try {
-        let response;
-        let data;
-        
-        // GitHub Gist 方式
-        if (syncApiUrl.includes('gist.githubusercontent.com')) {
-            response = await fetch(syncApiUrl);
-            if (response.ok) {
-                const text = await response.text();
-                data = JSON.parse(text);
-            }
-        }
-        // JSONBin.io 方式
-        else if (syncApiUrl.includes('jsonbin.io')) {
-            response = await fetch(`${syncApiUrl}/latest`, {
-                headers: {
-                    'X-Master-Key': localStorage.getItem('travelMapApiKey') || '$2b$10$your-key-here'
-                }
-            });
-            if (response.ok) {
-                const result = await response.json();
-                data = result.record || result;
-            }
-        }
-        
-        if (data && data.roomId === roomId) {
-            mergeCloudData(data);
-            updateSyncStatus('已同步（云端）');
-        }
-    } catch (error) {
-        console.error('加载云端数据失败:', error);
-        // 失败时不影响使用
-    }
-}
-
-// 同步到云端（简单API方式）
-async function syncToCloud() {
-    if (!syncApiUrl) {
-        syncToSharedStorage();
-        return;
-    }
-    
-    try {
-        const syncData = {
-            roomId: roomId,
-            places: places,
-            users: users,
-            timestamp: Date.now(),
-            lastUpdatedBy: currentUser
-        };
-        
-        let response;
-        
-        // GitHub Gist 方式（使用GitHub API写入）
-        if (syncApiUrl.includes('gist.githubusercontent.com')) {
-            const gistId = syncApiUrl.match(/gist\.githubusercontent\.com\/[^\/]+\/([^\/]+)/)?.[1];
-            const githubToken = localStorage.getItem('travelMapGithubToken');
-            
-            if (gistId && githubToken) {
-                try {
-                    // 使用GitHub API更新Gist
-                    response = await fetch(`https://api.github.com/gists/${gistId}`, {
-                        method: 'PATCH',
-                        headers: {
-                            'Authorization': `token ${githubToken}`,
-                            'Content-Type': 'application/json',
-                            'Accept': 'application/vnd.github.v3+json'
-                        },
-                        body: JSON.stringify({
-                            files: {
-                                'travel-map-data.json': {
-                                    content: JSON.stringify(syncData, null, 2)
-                                }
-                            }
-                        })
-                    });
-                    
-                    if (response.ok) {
-                        updateSyncStatus('已同步（云端）');
-                        return;
-                    } else {
-                        const errorData = await response.json();
-                        console.error('GitHub API错误:', errorData);
-                        throw new Error('GitHub API同步失败');
-                    }
-                } catch (error) {
-                    console.error('GitHub API同步错误:', error);
-                    // 失败时回退到本地存储
-                    syncToSharedStorage();
-                    return;
-                }
-            } else {
-                // 没有token，使用只读模式
-                console.log('GitHub Gist是只读的，请配置GitHub Token或使用导出/导入功能');
-                // 不调用syncToSharedStorage，因为Gist只读模式下不需要写入
-                updateSyncStatus('已同步（Gist只读）');
-                return;
-            }
-        }
-        // JSONBin.io 方式
-        else if (syncApiUrl.includes('jsonbin.io')) {
-            const apiKey = localStorage.getItem('travelMapApiKey');
-            response = await fetch(syncApiUrl, {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Master-Key': apiKey || '$2b$10$your-key-here'
-                },
-                body: JSON.stringify(syncData)
-            });
-        }
-        
-        if (response && response.ok) {
-            updateSyncStatus('已同步（云端）');
-        } else {
-            throw new Error('同步失败');
-        }
-    } catch (error) {
-        console.error('云端同步失败:', error);
-        updateSyncStatus('同步失败');
-        // 失败时回退到本地存储
-        syncToSharedStorage();
-    }
-}
-
-// 合并云端数据
-function mergeCloudData(data) {
-    let hasChanges = false;
-    
-    // 合并地点数据
-    if (data.places && Array.isArray(data.places)) {
-        const existingIds = new Set(places.map(p => p.id));
-        
-        data.places.forEach(place => {
-            if (!existingIds.has(place.id)) {
-                places.push(place);
-                hasChanges = true;
-            } else {
-                const index = places.findIndex(p => p.id === place.id);
-                if (index !== -1) {
-                    const existingPlace = places[index];
-                    const existingTimestamp = existingPlace.updatedAt || 0;
-                    const newTimestamp = place.updatedAt || 0;
-                    if (newTimestamp > existingTimestamp) {
-                        places[index] = place;
-                        hasChanges = true;
-                    }
-                }
-            }
-        });
-    }
-    
-    // 合并用户信息
-    if (data.users) {
-        if (data.users.user1 && data.users.user1.name && (!users.user1.name || users.user1.name === '用户1')) {
-            users.user1.name = data.users.user1.name;
-            if (data.users.user1.avatar) users.user1.avatar = data.users.user1.avatar;
-            hasChanges = true;
-        }
-        if (data.users.user2 && data.users.user2.name && (!users.user2.name || users.user2.name === '用户2')) {
-            users.user2.name = data.users.user2.name;
-            if (data.users.user2.avatar) users.user2.avatar = data.users.user2.avatar;
-            hasChanges = true;
-        }
-    }
-    
-    if (hasChanges) {
-        localStorage.setItem('travelPlaces', JSON.stringify(places));
-        saveUsers();
-        renderPlacesList();
-        if (map) {
-            updateMapMarkers();
-        }
-        updateUserDisplay();
-        updateUserAvatars();
-    }
-}
-
-// 同步到共享存储（优先使用云端，失败时使用localStorage）
-function syncToSharedStorage() {
-    if (syncApiUrl) {
-        syncToCloud();
-    } else {
-        try {
-            const syncData = {
-                places: places,
-                users: users,
-                timestamp: Date.now()
-            };
-            // 使用localStorage的共享key（你们两个使用相同的key）
-            localStorage.setItem(syncStorageKey, JSON.stringify(syncData));
-            updateSyncStatus('已同步（本地）');
-        } catch (e) {
-            console.error('同步失败:', e);
-            updateSyncStatus('同步失败');
-        }
-    }
-}
-
-// 从共享存储加载数据
-function loadFromSharedStorage() {
-    try {
-        const sharedData = localStorage.getItem(syncStorageKey);
-        if (sharedData) {
-            const data = JSON.parse(sharedData);
-            let hasChanges = false;
-            
-            // 合并地点数据
-            if (data.places && Array.isArray(data.places)) {
-                const existingIds = new Set(places.map(p => p.id));
-                data.places.forEach(place => {
-                    if (!existingIds.has(place.id)) {
-                        places.push(place);
-                        hasChanges = true;
-                    } else {
-                        // 更新已有地点（如果时间戳更新）
-                        const index = places.findIndex(p => p.id === place.id);
-                        if (index !== -1) {
-                            const existingPlace = places[index];
-                            const existingTimestamp = existingPlace.updatedAt || 0;
-                            const newTimestamp = place.updatedAt || data.timestamp || 0;
-                            if (newTimestamp > existingTimestamp) {
-                                places[index] = place;
-                                hasChanges = true;
-                            }
-                        }
-                    }
-                });
-            }
-            
-            // 合并用户信息
-            if (data.users) {
-                if (data.users.user1 && data.users.user1.name && (!users.user1.name || users.user1.name === '用户1')) {
-                    users.user1.name = data.users.user1.name;
-                    if (data.users.user1.avatar) users.user1.avatar = data.users.user1.avatar;
-                    hasChanges = true;
-                }
-                if (data.users.user2 && data.users.user2.name && (!users.user2.name || users.user2.name === '用户2')) {
-                    users.user2.name = data.users.user2.name;
-                    if (data.users.user2.avatar) users.user2.avatar = data.users.user2.avatar;
-                    hasChanges = true;
-                }
-                if (hasChanges) {
-                    saveUsers();
-                }
-            }
-            
-            if (hasChanges) {
-                savePlaces();
-                renderPlacesList();
-                if (map) {
-                    updateMapMarkers();
-                }
-                updateSyncStatus('已同步');
-            } else {
-                updateSyncStatus('已同步');
-            }
-        }
-    } catch (e) {
-        console.error('加载共享数据失败:', e);
-        updateSyncStatus('同步失败');
-    }
-}
-
-// 启动自动同步
-function startAutoSync() {
-    if (syncApiUrl && syncApiUrl.includes('gist.githubusercontent.com')) {
-        const githubToken = localStorage.getItem('travelMapGithubToken');
-        
-        if (githubToken) {
-            // 有Token，可以写入，使用真正的自动同步
-            syncInterval = setInterval(function() {
-                loadFromCloud();
-            }, 10000);
-            
-            // 初始同步
-            syncToCloud();
-            loadFromCloud();
-            updateSyncStatus('同步中（云端）');
-        } else {
-            // 没有Token，只能读取
-            syncInterval = setInterval(function() {
-                loadFromCloud();
-            }, 10000);
-            
-            // 初始加载
-            loadFromCloud();
-            updateSyncStatus('已同步（Gist只读）');
-        }
-    } else if (syncApiUrl) {
-        // 其他云端同步：每5秒检查一次
-        syncInterval = setInterval(function() {
-            loadFromCloud();
-        }, 5000);
-        
-        // 初始同步
-        syncToCloud();
-        loadFromCloud();
-        updateSyncStatus('同步中（云端）');
-    } else {
-        // 本地存储模式：每3秒检查一次
-        syncInterval = setInterval(function() {
-            loadFromSharedStorage();
-        }, 3000);
-        
-        // 初始同步
-        syncToSharedStorage();
-        updateSyncStatus('同步中（本地）');
-    }
-}
-
-// 停止自动同步
-function stopAutoSync() {
-    if (syncInterval) {
-        clearInterval(syncInterval);
-        syncInterval = null;
-    }
-}
-
-// 更新同步状态显示
-function updateSyncStatus(status) {
-    const syncStatusEl = document.getElementById('syncStatus');
-    if (syncStatusEl) {
-        syncStatusEl.textContent = status;
-        if (status === '已同步') {
-            syncStatusEl.style.color = '#51cf66';
-        } else if (status === '同步失败') {
-            syncStatusEl.style.color = '#ff4757';
-        } else {
-            syncStatusEl.style.color = '#667eea';
-        }
-    }
-    lastSyncTime = Date.now();
-}
-

@@ -1,189 +1,250 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>我们的旅行地图</title>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="styles.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WORLDMAP.SH</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <!-- 登录/访问控制界面 -->
-    <div id="loginModal" class="modal" style="display: none !important;">
-        <div class="modal-content login-content">
-            <h2>🔒 访问我们的旅行地图</h2>
-            <p class="login-hint">默认密码：20251213</p>
-            <form id="loginForm">
-                <div class="form-group">
-                    <input type="password" id="accessPassword" placeholder="请输入密码（默认：20251213）" required autofocus>
-                </div>
-                <div class="form-actions">
-                    <button type="submit" class="btn btn-primary">进入</button>
-                    <button type="button" id="resetPasswordBtn" class="btn btn-secondary" style="margin-top: 10px;">重置密码</button>
-                </div>
-            </form>
-            <p class="login-note">首次使用：将自动使用默认密码 20251213</p>
-        </div>
-    </div>
 
-    <!-- 用户设置模态框 -->
-    <div id="userSettingsModal" class="modal" style="display: none !important;">
-        <div class="modal-content">
-            <span class="close-settings">&times;</span>
-            <h2>👥 用户设置</h2>
-            <div id="userSettings">
-                <div class="user-setting-item">
-                    <h3>用户1</h3>
-                    <div class="avatar-upload">
-                        <img id="user1AvatarPreview" src="" alt="用户1头像" class="avatar-preview">
-                        <input type="file" id="user1AvatarInput" accept="image/*" style="display: none;">
-                        <button type="button" class="btn btn-secondary" onclick="document.getElementById('user1AvatarInput').click()">选择头像</button>
-                    </div>
-                    <input type="text" id="user1Name" placeholder="用户1名称" class="user-name-input">
-                </div>
-                <div class="user-setting-item">
-                    <h3>用户2</h3>
-                    <div class="avatar-upload">
-                        <img id="user2AvatarPreview" src="" alt="用户2头像" class="avatar-preview">
-                        <input type="file" id="user2AvatarInput" accept="image/*" style="display: none;">
-                        <button type="button" class="btn btn-secondary" onclick="document.getElementById('user2AvatarInput').click()">选择头像</button>
-                    </div>
-                    <input type="text" id="user2Name" placeholder="用户2名称" class="user-name-input">
-                </div>
+  <!-- Header -->
+  <header id="header">
+    <div class="header-left">
+      <span class="prompt-symbol">&#10095;</span>
+      <span class="app-title">WORLDMAP.SH</span>
+      <span class="header-stats" id="headerStats">// initializing...</span>
+    </div>
+    <div class="header-right">
+      <div class="user-switcher">
+        <span class="dim">user:</span>
+        <button class="user-chip active" id="user1Chip" onclick="switchUser('user1')">
+          <span id="user1ChipName">U1</span>
+        </button>
+        <button class="user-chip" id="user2Chip" onclick="switchUser('user2')">
+          <span id="user2ChipName">U2</span>
+        </button>
+        <button class="icon-btn" id="userSettingsBtn" title="User Settings">&#9881;</button>
+      </div>
+      <div class="header-actions">
+        <button class="btn btn-primary" id="addPlaceBtn">+ ADD_PLACE</button>
+        <button class="btn btn-blue" id="syncSetupBtn"><span class="sync-dot" id="syncDot"></span>SYNC</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Filter bar -->
+  <div class="filter-bar">
+    <span class="dim">filter:</span>
+    <button class="filter-btn active" data-filter="all">ALL</button>
+    <button class="filter-btn" data-filter="visited">VISITED</button>
+    <button class="filter-btn" data-filter="wishlist">WISHLIST</button>
+    <button class="filter-btn" data-filter="planned">PLANNED</button>
+    <div class="filter-stats">
+      <span class="stat-visited"><span id="visitedCount">0</span> visited</span>
+      <span class="stat-wishlist"><span id="wishlistCount">0</span> wishlist</span>
+      <span class="stat-planned"><span id="plannedCount">0</span> planned</span>
+    </div>
+  </div>
+
+  <!-- Main: map + sidebar -->
+  <div class="main">
+    <div id="map"></div>
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <span class="prompt-line">&#10095; ls -la /places</span>
+        <input class="sidebar-search" id="sidebarSearch" type="text" placeholder="// search...">
+      </div>
+      <div id="placesList" class="places-list"></div>
+    </aside>
+  </div>
+
+  <!-- Status bar -->
+  <div class="statusbar">
+    <span id="statusMsg">&#10095; ready</span>
+    <span class="statusbar-right" id="coordDisplay"></span>
+  </div>
+
+  <!-- ============ MODALS ============ -->
+
+  <!-- Add / Edit Place -->
+  <div class="modal-overlay" id="placeModalOverlay">
+    <div class="terminal-window" id="placeModal">
+      <div class="tw-titlebar">
+        <span class="tw-dots"><span></span><span></span><span></span></span>
+        <span class="tw-title" id="placeModalTitle">ADD_PLACE</span>
+        <button class="tw-close" id="placeModalClose">&#10005;</button>
+      </div>
+      <div class="tw-body">
+        <form id="placeForm">
+          <div class="field-row">
+            <label>NAME *</label>
+            <div class="input-with-btn">
+              <input type="text" id="placeName" placeholder="e.g. Barcelona" autocomplete="off" required>
+              <button type="button" id="searchBtn" class="btn btn-ghost btn-sm">&#128269; LOOKUP</button>
             </div>
-            <div class="form-actions">
-                <button type="button" id="saveUserSettings" class="btn btn-primary">保存设置</button>
+          </div>
+          <div class="field-row">
+            <label>COUNTRY</label>
+            <input type="text" id="placeCountry" placeholder="e.g. Spain" autocomplete="off">
+          </div>
+          <div class="field-row">
+            <label>TYPE *</label>
+            <div class="type-selector">
+              <label class="type-opt">
+                <input type="radio" name="placeType" value="visited" checked>
+                <span class="type-chip visited">VISITED</span>
+              </label>
+              <label class="type-opt">
+                <input type="radio" name="placeType" value="wishlist">
+                <span class="type-chip wishlist">WISHLIST</span>
+              </label>
+              <label class="type-opt">
+                <input type="radio" name="placeType" value="planned">
+                <span class="type-chip planned">PLANNED</span>
+              </label>
             </div>
-        </div>
-    </div>
-
-    <div class="container" id="mainContainer" style="display: none;">
-        <header>
-            <h1>🌍 我们的旅行地图</h1>
-            <div class="header-controls">
-                <div class="user-info">
-                    <div class="current-user">
-                        <img id="currentUserAvatar" src="" alt="当前用户" class="user-avatar-small">
-                        <span id="currentUserName">用户</span>
-                        <button id="switchUserBtn" class="btn btn-secondary btn-small">切换</button>
-                    </div>
-                    <button id="userSettingsBtn" class="btn btn-secondary btn-small">⚙️ 设置</button>
-                    <button id="exportDataBtn" class="btn btn-secondary btn-small" title="导出数据">📤 导出</button>
-                    <button id="importDataBtn" class="btn btn-secondary btn-small" title="导入数据">📥 导入</button>
-                    <button id="syncStatusBtn" class="btn btn-secondary btn-small" title="点击手动同步">🔄 <span id="syncStatus">同步</span></button>
-                </div>
-                <button id="addPlaceBtn" class="btn btn-primary">➕ 添加地点</button>
-                <div class="filter-buttons">
-                    <button class="filter-btn active" data-filter="all">全部</button>
-                    <button class="filter-btn" data-filter="visited">已去过</button>
-                    <button class="filter-btn" data-filter="wishlist">想去</button>
-                    <button class="filter-btn" data-filter="user">按用户</button>
-                </div>
+          </div>
+          <div class="field-row">
+            <label>ADDED BY</label>
+            <div class="user-radio">
+              <label class="user-opt">
+                <input type="radio" name="placeUser" value="user1" checked>
+                <span id="formUser1Name">USER_1</span>
+              </label>
+              <label class="user-opt">
+                <input type="radio" name="placeUser" value="user2">
+                <span id="formUser2Name">USER_2</span>
+              </label>
             </div>
-        </header>
-
-        <div class="main-content">
-            <div id="map" class="map-container"></div>
-            
-            <aside class="sidebar">
-                <h2>地点列表</h2>
-                <div id="placesList" class="places-list">
-                    <p class="empty-message">点击"添加地点"开始记录你们的旅行足迹吧！</p>
-                </div>
-            </aside>
-        </div>
+          </div>
+          <div class="field-row">
+            <label>DATE</label>
+            <input type="month" id="placeDate">
+          </div>
+          <div class="field-row">
+            <label>NOTES</label>
+            <textarea id="placeNotes" rows="3" placeholder="// memories, tips, plans..."></textarea>
+          </div>
+          <div class="field-row">
+            <label>COORDINATES *</label>
+            <div class="coords-row">
+              <input type="number" id="placeLat" step="any" placeholder="lat" required>
+              <input type="number" id="placeLng" step="any" placeholder="lng" required>
+              <button type="button" id="geoLocBtn" class="btn btn-ghost btn-sm">&#128205; GPS</button>
+            </div>
+            <small class="hint">// click map to pick location</small>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">SAVE</button>
+            <button type="button" id="placeModalCancelBtn" class="btn btn-ghost">CANCEL</button>
+            <button type="button" id="deletePlaceBtn" class="btn btn-danger" style="display:none;margin-left:auto">DELETE</button>
+          </div>
+        </form>
+      </div>
     </div>
+  </div>
 
-    <!-- 添加/编辑地点模态框 -->
-    <div id="placeModal" class="modal">
-        <div class="modal-content">
-            <span class="close">&times;</span>
-            <h2 id="modalTitle">添加新地点</h2>
-            <form id="placeForm">
-                <div class="form-group">
-                    <label for="placeName">地点名称 *</label>
-                    <div class="name-input-group">
-                        <input type="text" id="placeName" required placeholder="例如：巴黎、北京、Tokyo">
-                        <button type="button" id="searchLocationBtn" class="btn btn-secondary">🔍 搜索坐标</button>
-                    </div>
-                    <small class="hint-text">输入城市或地点名称后点击"搜索坐标"自动获取位置</small>
-                </div>
-                
-                <div class="form-group">
-                    <label for="placeType">类型 *</label>
-                    <select id="placeType" required>
-                        <option value="visited">已去过</option>
-                        <option value="wishlist">想去</option>
-                    </select>
-                </div>
-                
-                <div class="form-group">
-                    <label>添加者</label>
-                    <div class="user-selector">
-                        <label class="user-option">
-                            <input type="radio" name="placeUser" value="user1" checked>
-                            <img id="formUser1Avatar" src="" alt="用户1" class="user-avatar-selector">
-                            <span id="formUser1Name">用户1</span>
-                        </label>
-                        <label class="user-option">
-                            <input type="radio" name="placeUser" value="user2">
-                            <img id="formUser2Avatar" src="" alt="用户2" class="user-avatar-selector">
-                            <span id="formUser2Name">用户2</span>
-                        </label>
-                    </div>
-                </div>
-                
-                <div class="form-group">
-                    <label for="placeNotes">备注</label>
-                    <textarea id="placeNotes" rows="4" placeholder="记录下你们的回忆或计划..."></textarea>
-                </div>
-                
-                <div class="form-group">
-                    <label for="placeDate">日期</label>
-                    <div class="date-input-group">
-                        <select id="placeDateYear" style="flex: 1; padding: 10px; border: 2px solid #e0e0e0; border-radius: 6px; font-size: 14px;">
-                            <option value="">选择年份（可选）</option>
-                        </select>
-                        <select id="placeDateMonth" style="flex: 1; padding: 10px; border: 2px solid #e0e0e0; border-radius: 6px; font-size: 14px; margin-left: 10px;">
-                            <option value="">选择月份（可选）</option>
-                        </select>
-                        <input type="date" id="placeDate" style="flex: 1; margin-left: 10px;">
-                    </div>
-                    <small class="hint-text">可以只选择年份，或选择完整日期</small>
-                </div>
-                
-                <div class="form-group">
-                    <label>坐标（自动填充或手动输入）</label>
-                    <div class="coords-input">
-                        <input type="number" id="placeLat" step="any" placeholder="纬度" required>
-                        <input type="number" id="placeLng" step="any" placeholder="经度" required>
-                        <button type="button" id="getCurrentLocation" class="btn btn-secondary">📍 当前位置</button>
-                    </div>
-                    <small class="hint-text">也可以在地图上点击选择位置</small>
-                </div>
-                
-                <div class="form-actions">
-                    <button type="submit" class="btn btn-primary">保存</button>
-                    <button type="button" id="cancelBtn" class="btn btn-secondary">取消</button>
-                    <button type="button" id="deleteBtn" class="btn btn-danger" style="display: none;">删除</button>
-                </div>
-            </form>
-        </div>
+  <!-- Place Detail -->
+  <div class="modal-overlay" id="detailModalOverlay">
+    <div class="terminal-window wide" id="detailModal">
+      <div class="tw-titlebar">
+        <span class="tw-dots"><span></span><span></span><span></span></span>
+        <span class="tw-title" id="detailTitle">PLACE_DETAIL</span>
+        <button class="tw-close" id="detailModalClose">&#10005;</button>
+      </div>
+      <div class="tw-body" id="detailBody"></div>
     </div>
+  </div>
 
-    <!-- 地点详情模态框 -->
-    <div id="detailModal" class="modal">
-        <div class="modal-content">
-            <span class="close-detail">&times;</span>
-            <div id="placeDetails"></div>
-        </div>
+  <!-- Trip Planner -->
+  <div class="modal-overlay" id="tripModalOverlay">
+    <div class="terminal-window trip-modal" id="tripModal">
+      <div class="tw-titlebar">
+        <span class="tw-dots"><span></span><span></span><span></span></span>
+        <span class="tw-title" id="tripModalTitle">TRIP_PLANNER</span>
+        <button class="tw-close" id="tripModalClose">&#10005;</button>
+      </div>
+      <div class="tw-body" id="tripModalBody"></div>
     </div>
+  </div>
 
-    <!-- 隐藏的文件输入用于导入数据 -->
-    <input type="file" id="importFileInput" accept=".json" style="display: none;">
+  <!-- User Settings -->
+  <div class="modal-overlay" id="userModalOverlay">
+    <div class="terminal-window" id="userModal">
+      <div class="tw-titlebar">
+        <span class="tw-dots"><span></span><span></span><span></span></span>
+        <span class="tw-title">USER_SETTINGS</span>
+        <button class="tw-close" id="userModalClose">&#10005;</button>
+      </div>
+      <div class="tw-body">
+        <div class="field-row">
+          <label>USER_1 NAME</label>
+          <input type="text" id="user1NameInput" placeholder="Your name">
+        </div>
+        <div class="field-row">
+          <label>USER_2 NAME</label>
+          <input type="text" id="user2NameInput" placeholder="Partner's name">
+        </div>
+        <div class="field-row">
+          <label>AI API KEY (DeepSeek / Claude — for trip planning)</label>
+          <input type="password" id="claudeKeyInput" placeholder="sk-...">
+          <small class="hint">// stored locally only · DeepSeek: platform.deepseek.com</small>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-primary" id="saveUsersBtn">SAVE</button>
+          <button class="btn btn-ghost" id="cancelUsersBtn">CANCEL</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="app.js"></script>
+  <!-- Sync Config Modal -->
+  <div class="modal-overlay" id="syncModalOverlay">
+    <div class="terminal-window" id="syncModal">
+      <div class="tw-titlebar">
+        <span class="tw-dots"><span></span><span></span><span></span></span>
+        <span class="tw-title">CLOUD_SYNC</span>
+        <button class="tw-close" id="syncModalClose">&#10005;</button>
+      </div>
+      <div class="tw-body">
+        <div class="sync-setup-info">
+          <strong>&#9729; Supabase 免费云同步</strong><br>
+          两个人的数据自动同步，不需要手动导入导出。<br><br>
+          <strong>1.</strong> 去 <strong>supabase.com</strong> 创建免费账号 &amp; 新项目<br>
+          <strong>2.</strong> 在 SQL Editor 运行下面这段：
+          <div class="sql-block">create table worldmap_data (
+  id text primary key default 'main',
+  data jsonb, updated_at timestamptz default now()
+);
+alter table worldmap_data enable row level security;
+create policy "open" on worldmap_data for all using (true) with check (true);</div>
+          <strong>3.</strong> 在 Settings → API 复制 URL 和 anon key 填下面
+        </div>
+        <div class="field-row">
+          <label>SUPABASE URL</label>
+          <input type="text" id="sbUrl" placeholder="https://xxxx.supabase.co">
+        </div>
+        <div class="field-row">
+          <label>ANON KEY</label>
+          <input type="password" id="sbKey" placeholder="eyJhbGci...">
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-blue" id="saveSyncBtn">CONNECT</button>
+          <button class="btn btn-ghost" id="cancelSyncBtn">CANCEL</button>
+          <button class="btn btn-danger" id="clearSyncBtn" style="margin-left:auto">DISCONNECT</button>
+        </div>
+        <div id="syncStatusMsg" style="margin-top:12px;font-size:11px;color:var(--text-muted)"></div>
+      </div>
+    </div>
+  </div>
+
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="app.js"></script>
 </body>
 </html>
-
