@@ -1082,7 +1082,7 @@ function importShareCode() {
 }
 
 async function saveSyncConfig() {
-  const url = document.getElementById('sbUrl').value.trim();
+  const url = document.getElementById('sbUrl').value.trim().replace(/\/rest\/v1\/?$/, '').replace(/\/$/, '');
   const key = document.getElementById('sbKey').value.trim();
   if (!url || !key) { setStatus('error: fill in both URL and key', true); return; }
   localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify({ url, key }));
